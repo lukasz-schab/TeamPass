@@ -3,7 +3,7 @@
  * @package       folders.load.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -51,7 +51,7 @@ $(function() {
         "processing": true,
         "serverSide": true,
         "ajax": {
-            url: "<?php echo $SETTINGS['cpassman_url']; ?>/sources/datatable/datatable.folders.php",
+            url: "<?php echo $SETTINGS['cpassman_url']; ?>/sources/datatable/datatable.folders.php?token=<?php echo $_SESSION["key"]; ?>",
             data: function(d) {
                 d.letter = _alphabetSearch
             }

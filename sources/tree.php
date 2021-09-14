@@ -3,7 +3,7 @@
  * @package       tree.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -314,6 +314,8 @@ function recursiveTree($nodeId)
     $session_list_folders_limited = $superGlobal->get("list_folders_limited", "SESSION");
     $session_read_only_folders = $superGlobal->get("read_only_folders", "SESSION");
 
+
+
     // Be sure that user can only see folders he/she is allowed to
     if (in_array($completTree[$nodeId]->id, $session_forbiden_pfs) === false
         || in_array($completTree[$nodeId]->id, $session_groupes_visibles) === true
@@ -353,11 +355,23 @@ function recursiveTree($nodeId)
                 || @in_array($node, $listFoldersLimitedKeys) === true
                 || @in_array($node, $listRestrictedFoldersForItemsKeys) === true
             ) {
-                $displayThisNode = true;
+                // Final check - is PF allowed?
+                $nodeDetails = $tree->getNode($node);
+                if ($nodeDetails->personal_folder === '1'
+                    && intval($SETTINGS['enable_pf_feature']) === 1
+                    && intval($_SESSION['personal_folder']) === 0
+                ) {
+                    $displayThisNode = false;
+                } else {
+                    $displayThisNode = true;
+                }
                 $hide_node = $show_but_block = false;
                 $text = $title = "";
             }
         }
+
+        //echo " >> ".$nodeId." ; ".$displayThisNode." ;; ";
+        //print_r($session_groupes_visibles);
 
         if ($displayThisNode === true) {
             // get info about current folder

@@ -4,7 +4,7 @@
  * @package       items.export.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -13,7 +13,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-require_once('./sources/SecureHandler.php');
+require_once './sources/SecureHandler.php';
 session_start();
 if ((!isset($_SESSION['CPM']) || $_SESSION['CPM'] != 1 ||
     !isset($_SESSION['user_id']) || empty($_SESSION['user_id']) ||
@@ -41,8 +41,8 @@ if (!checkUser($_SESSION['user_id'], $_SESSION['key'], "home")) {
     exit();
 }
 
-include $SETTINGS['cpassman_dir'].'/includes/language/'.$_SESSION['user_language'].'.php';
-include $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
+require $SETTINGS['cpassman_dir'].'/includes/language/'.$_SESSION['user_language'].'.php';
+require $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
 header("Content-type: text/html; charset=utf-8");
 header("Cache-Control: no-cache, no-store, must-revalidate");
 
@@ -163,7 +163,7 @@ echo '
                             pdf_password : $("#export_pdf_password").val()
                         },
                         function(data) {
-                            $("#export_information").html('<i class="fa fa-download"></i>&nbsp;'+data[0].text);
+                            $("#export_information").html("<span class='fa fa-file-code-o'></span>&nbsp;<a href='"+data[0].href+"'><?php echo $LANG['pdf_download']; ?></a>").show();
                         },
                         "json"
                     );
@@ -236,7 +236,7 @@ echo '
                     pdf_password : $("#pdf_password").val()
                 },
                 function(data) {
-                    $("#export_information").html('<i class="fa fa-download"></i>&nbsp;'+data[0].text);
+                    $("#export_information").html("<span class='fa fa-file-code-o'></span>&nbsp;<a href='"+data[0].href+"'><?php echo $LANG['pdf_download']; ?></a>").show();
                 },
                 "json"
             );

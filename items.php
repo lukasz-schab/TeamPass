@@ -4,7 +4,7 @@
  * @package       items.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -41,14 +41,13 @@ require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';
 require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
 require_once $SETTINGS['cpassman_dir'].'/includes/libraries/protect/SuperGlobal/SuperGlobal.php';
 $superGlobal = new protect\SuperGlobal\SuperGlobal();
-
+            
 // Prepare GET variables
 $get_group = $superGlobal->get("group", "GET");
 $get_id = $superGlobal->get("id", "GET");
 
 // Prepare SESSION variables
 $session_user_admin = $superGlobal->get("user_admin", "SESSION");
-
 
 if ($session_user_admin === '1'
     && (isset($SETTINGS_EXT['admin_full_right']) === true && $SETTINGS_EXT['admin_full_right'] === true)
@@ -83,6 +82,7 @@ foreach ($rows as $reccord) {
         $listRoles .= ';'.$reccord['id'].'#'.$reccord['title'];
     }
 }
+
 
 // Hidden things
 echo '
@@ -146,7 +146,8 @@ echo '
 <input type="hidden" id="item_user_token" value="" />
 <input type="hidden" id="items_listing_should_stop" value="" />
 <input type="hidden" id="new_listing_characteristics" value="" />
-<input type="hidden" id="uniqueLoadData" value="" />';
+<input type="hidden" id="uniqueLoadData" value="" />
+<input type="hidden" id="otv-url" value="" />';
 
 echo '
 <div id="div_items">';
@@ -426,7 +427,7 @@ echo '
         <div id="item_tabs">
         <ul>
             <li><a href="#tabs-01">'.$LANG['definition'].'</a></li>
-            <li><a href="#tabs-02">'.$LANG['index_password'].' &amp; '.$LANG['visibility'].'</a></li>
+            <li><a href="#tabs-02">'.$LANG['index_password'].'</a></li>
             <li><a href="#tabs-03">'.$LANG['files_&_images'].'</a></li>
             ', isset($SETTINGS['item_extra_fields']) && $SETTINGS['item_extra_fields'] == 1 ?
             '<li id="form_tab_fields"><a href="#tabs-04">'.$LANG['more'].'</a></li>' : '', '
@@ -627,7 +628,7 @@ echo '
     <form method="post" name="form_edit" action="">
     <div id="edit_afficher_visibilite" style="text-align:center;margin-bottom:6px;height:25px;"></div>
     <div id="edit_display_title" style="text-align:center;margin-bottom:6px;font-size:17px;font-weight:bold;height:25px;"></div>
-    <div id="edit_show_error" style="text-align:center;margin:2px;display:none;" class="ui-state-error ui-corner-all"></div>';
+    <div id="edit_show_error" style="text-align:center;margin:2px;" class="ui-state-error ui-corner-all hidden"></div>';
 // Prepare TABS
 echo '
     <div id="item_edit_tabs">
@@ -781,6 +782,7 @@ echo '
         </div>';
 // Tabs EDIT N°4 -> Categories
 if (isset($SETTINGS['item_extra_fields']) && $SETTINGS['item_extra_fields'] == 1) {
+    $templateID = -1;
     echo '
         <div id="tabs-4">
             <div id="edit_item_more">';
@@ -798,6 +800,7 @@ if (isset($SETTINGS['item_extra_fields']) && $SETTINGS['item_extra_fields'] == 1
                         <input type="checkbox" id="template_edit_'.$elem[0].'" class="item_edit_template template_for_items" data-category-id="'.$elem[0].'"/>
                         <label for="template_edit_'.$elem[0].'" class="pointer">'.$LANG['main_template'].'</label>
                         </div>';
+            $templateID = $elem[0];
         }
         echo '
                     </div>';
@@ -812,10 +815,10 @@ if (isset($SETTINGS['item_extra_fields']) && $SETTINGS['item_extra_fields'] == 1
             echo '</label>';
             if ($field[3] === 'text') {
                 echo '
-                        <input type="text" id="edit_field_'.$field[0].'_'.$elem[0].'" class="edit_item_field input_text text ui-widget-content ui-corner-all" size="40" data-field-type="'.$field[3].'" data-field-masked="'.$field[4].'" data-field-is-mandatory="'.$field[5].'">';
+                        <input type="text" id="edit_field_'.$field[0].'_'.$elem[0].'" class="edit_item_field input_text text ui-widget-content ui-corner-all" size="40" data-field-type="'.$field[3].'" data-field-masked="'.$field[4].'" data-field-is-mandatory="'.$field[5].'" data-template-id="'.$templateID.'">';
             } else if ($field[3] === 'textarea') {
                 echo '
-                        <textarea id="edit_field_'.$field[0].'_'.$elem[0].'" class="edit_item_field input_text text ui-widget-content ui-corner-all" colums="40" rows="5" data-field-type="'.$field["3"].'" data-field-masked="'.$field[4].'" data-field-is-mandatory="'.$field[5].'"></textarea>';
+                        <textarea id="edit_field_'.$field[0].'_'.$elem[0].'" class="edit_item_field input_text text ui-widget-content ui-corner-all" colums="40" rows="5" data-field-type="'.$field["3"].'" data-field-masked="'.$field[4].'" data-field-is-mandatory="'.$field[5].'" data-template-id="'.$templateID.'"></textarea>';
             }
             echo '
                     </div>';
@@ -1080,5 +1083,11 @@ echo '
         <div id="reason_to_access_info" style="margin-top:5px; padding:4px;"></div>
     </div>
 </div>';
+
+// Alert BOX
+echo '
+    <div id="dialog_otv" style="display:none;">
+        <div id="dialog_otv_text" style="text-align:center; padding:4px; font-size:12px; margin-top:10px;"></div>
+    </div>';
 
 require_once 'items.load.php';

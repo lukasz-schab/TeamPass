@@ -3,7 +3,7 @@
  * @package       views.load.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -22,6 +22,7 @@ if (!isset($_SESSION['CPM']) || $_SESSION['CPM'] != 1) {
 function GenererLog()
 {
     if ($("#log_jours").val() == "") return false;
+    $("#lien_pdf").html('');
 
     LoadingPage();
     $.post(

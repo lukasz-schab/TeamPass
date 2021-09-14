@@ -4,7 +4,7 @@
  * @package       ssh.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -208,7 +208,7 @@ function start_one_shot_change()
                 $('#edit_pw1').val($('#ausp_pwd').val());
                 $("#hid_pw").val($('#ausp_pwd').val());
                 // change quick password
-                new Clipboard("#menu_button_copy_pw, #button_quick_pw_copy", {
+                new ClipboardJS("#menu_button_copy_pw, #button_quick_pw_copy", {
                     text: function() {
                         return unsanitizeString($('#edit_pw1').val());
                     }

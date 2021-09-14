@@ -5,7 +5,7 @@ namespace Tree\NestedTree;
  * @package       NestedTree.class.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -410,7 +410,7 @@ class NestedTree
 
         foreach ($data as $folder_id => $row) {
             // skip the root node
-            if ($folder_id == 0) {
+            if ($folder_id == 0 || isset($row->nlevel) === false) {
                 continue;
             }
 

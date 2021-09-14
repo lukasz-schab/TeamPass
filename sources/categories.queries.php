@@ -3,7 +3,7 @@
  * @package       categories.queries.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -169,6 +169,7 @@ if (null !== $post_type) {
                     'parent_id' => filter_var($dataReceived['category'], FILTER_SANITIZE_NUMBER_INT),
                     'type' => filter_var($dataReceived['type'], FILTER_SANITIZE_STRING),
                     'encrypted_data' => filter_var($dataReceived['encrypted'], FILTER_SANITIZE_STRING),
+                    'is_mandatory' => filter_var($dataReceived['is_mandatory'], FILTER_SANITIZE_STRING),
                     'masked' => filter_var($dataReceived['masked'], FILTER_SANITIZE_STRING),
                     'role_visibility' => filter_var($dataReceived['roles'], FILTER_SANITIZE_STRING),
                     'order' => filter_var($dataReceived['order'], FILTER_SANITIZE_NUMBER_INT)

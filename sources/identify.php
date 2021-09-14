@@ -4,7 +4,7 @@
  * @package       identify.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -13,7 +13,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-$debugLdap = 0; //Can be used in order to debug LDAP authentication
+$debugLdap = 1; //Can be used in order to debug LDAP authentication
 $debugDuo = 0; //Can be used in order to debug DUO authentication
 
 require_once 'SecureHandler.php';
@@ -175,6 +175,12 @@ if ($post_type === "identify_duo_user") {
                                 'personal_folder' => '1'
                             )
                         );
+                        
+                        // Rebuild tree
+                        $tree = new SplClassLoader('Tree\NestedTree', $SETTINGS['cpassman_dir'].'/includes/libraries');
+                        $tree->register();
+                        $tree = new Tree\NestedTree\NestedTree(prefix_table("nested_tree"), 'id', 'parent_id', 'title');
+                        $tree->rebuild();
                     }
                 }
             }
@@ -370,7 +376,15 @@ if ($post_type === "identify_duo_user") {
         $fa_method = 'duo';
         $nb++;
     }
-    echo '[{"agses" : "'.$agses.'" , "google" : "'.$google.'" , "yubico" : "'.$yubico.'" , "duo" : "'.$duo.'" , "nb" : "'.$nb.'" , "method" : "'.$fa_method.'"}]';
+    echo '[{
+        "agses" : "'.$agses.'",
+        "google" : "'.$google.'",
+        "yubico" : "'.$yubico.'",
+        "duo" : "'.$duo.'",
+        "nb" : "'.$nb.'",
+        "method" : "'.$fa_method.'",
+        "admin_2fa_required" : "'.$SETTINGS['admin_2fa_required'].'"
+    }]';
     return false;
 }
 
@@ -413,7 +427,7 @@ function identifyUser(
         $dbgDuo = fopen($SETTINGS['path_to_files_folder']."/duo.debug.txt", "a");
 
         fputs(
-            $dbgDuo,
+            /** @scrutinizer ignore-type */ $dbgDuo,
             "Content of data sent '".filter_var($sentData, FILTER_SANITIZE_STRING)."'\n"
         );
     }
@@ -458,10 +472,16 @@ function identifyUser(
         }
         $passwordClear = $_SERVER['PHP_AUTH_PW'];
     } else {
-        $passwordClear = htmlspecialchars_decode($dataReceived['pw']);
-        $username = $antiXss->xss_clean(htmlspecialchars_decode($dataReceived['login']));
+        $passwordClear = $dataReceived['pw'];
+        $username = $dataReceived['login'];
     }
-    
+
+    if (isset($dataReceived['login_sanitized']) === true && empty($dataReceived['login_sanitized']) === false) {
+        $usernameSanitized = $antiXss->xss_clean(htmlspecialchars_decode($dataReceived['login_sanitized']));
+    } else {
+        $usernameSanitized = '';
+    }
+
     // User's 2FA method
     $user_2fa_selection = $antiXss->xss_clean(htmlspecialchars_decode($dataReceived['user_2fa_selection']));
 
@@ -471,7 +491,7 @@ function identifyUser(
     // Check 2FA
     if ((($SETTINGS['yubico_authentication'] === '1' && empty($user_2fa_selection) === true)
         || ($SETTINGS['google_authentication'] === '1' && empty($user_2fa_selection) === true))
-        && $username !== 'admin'
+        && ($username !== 'admin' || ((int) $SETTINGS['admin_2fa_required'] === 1 && $username === 'admin'))
     ) {
         echo '[{"value" : "2fa_not_set", "user_admin":"',
             isset($_SESSION['user_admin']) ? $_SESSION['user_admin'] : "",
@@ -530,6 +550,31 @@ function identifyUser(
         )
     );
     $counter = DB::count();
+
+    // 2.1.27.24 - in case of login encoding error
+    if ($counter === 0) {
+        // Test 
+        $data = DB::queryFirstRow(
+            "SELECT * FROM ".prefix_table("users")." WHERE login=%s_login",
+            array(
+                'login' => $usernameSanitized
+            )
+        );
+        $counter = DB::count();
+        if ($counter === 1) {
+            // Adapt in DB
+            DB::update(
+                prefix_table('users'),
+                array(
+                    'login' => $username
+                ),
+                "id=%i",
+                $data['id']
+            );
+            $data['login'] = $username;
+        }
+    }
+
     $user_initial_creation_through_ldap = false;
     $proceedIdentification = false;
 
@@ -583,7 +628,7 @@ function identifyUser(
                         $ldapconn,
                         $SETTINGS['ldap_search_base'],
                         $filter,
-                        array('dn', 'mail', 'givenname', 'sn', 'samaccountname')
+                        array('dn', 'mail', 'givenname', 'sn', 'samaccountname', 'shadowexpire', 'useraccountcontrol')
                     );
                     if ($debugLdap == 1) {
                         fputs(
@@ -592,7 +637,7 @@ function identifyUser(
                             'Results : '.print_r(ldap_get_entries($ldapconn, $result), true)."\n"
                         );
                     }
-
+                    
                     // Check if user was found in AD
                     if (ldap_count_entries($ldapconn, $result) > 0) {
                         // Get user's info and especially the DN
@@ -604,11 +649,17 @@ function identifyUser(
                             'User was found. '.$user_dn.'\n'
                         );
 
+                        // Check shadowexpire attribute - if === 1 then user disabled
+                        if (isset($result[0]['shadowexpire'][0]) === true && $result[0]['shadowexpire'][0] === '1') {
+                            echo '[{"value" : "user_not_exists '.$username.'", "text":""}]';
+                            exit();
+                        }
+
                         // Should we restrain the search in specified user groups
                         $GroupRestrictionEnabled = false;
                         if (isset($SETTINGS['ldap_usergroup']) === true && empty($SETTINGS['ldap_usergroup']) === false) {
-                            // New way to check User's group membership
-                            $filter_group = "memberUid=".$username;
+                            // New way to check User's group membership & also allow RFC2307bis group membership
+                            $filter_group = "(|(memberUid=".$username.")(member=".$user_dn."))";
                             $result_group = ldap_search(
                                 $ldapconn,
                                 $SETTINGS['ldap_search_base'],
@@ -668,16 +719,27 @@ function identifyUser(
                                     DB::update(
                                         prefix_table('users'),
                                         array(
-                                            'pw' => $data['pw']
+                                            'pw' => $data['pw'],
+                                            'login' => $data['login']
                                         ),
                                         "id = %i",
                                         $data['id']
                                     );
 
-                                    // No user creation is requested
                                     $proceedIdentification = true;
                                 }
                             } else {
+                                // CLear the password in database with random token
+                                DB::update(
+                                    prefix_table('users'),
+                                    array(
+                                        'pw' => $pwdlib->createPasswordHash($pwdlib->getRandomToken(12)),
+                                        'login' => $data['login'],
+                                    ),
+                                    'id = %i',
+                                    $data['id']
+                                );
+
                                 $ldapConnection = false;
                             }
                         }
@@ -756,6 +818,25 @@ function identifyUser(
                     $ldapConnection = true;
                 }
 
+                // Is user expired?
+                $_UserExpiry = $adldap->user()->passwordExpiry($auth_username);
+                if ($debugLdap == 1) {
+                    fputs($dbgLdap, "expiry check of user $auth_username returned: $_UserExpiry\n\n");
+                }
+                if (is_array($_UserExpiry) === false
+                    && strstr($_UserExpiry, "not expire") === false
+                ) {
+                    echo '[{"value" : "user_not_exists '.$auth_username.'", "text":""}]';
+                    exit();
+                }
+
+                // Is user disabled?
+                $user_info_from_ad = $adldap->user()->info($auth_username, array("useraccountcontrol"));
+                if ((($user_info[0]['useraccountcontrol'][0] & 2) == 0) === false) {
+                    echo '[{"value" : "user_disabled'.$auth_username.'", "text":""}]';
+                    exit();
+                }
+
                 // Update user's password
                 if ($ldapConnection === true) {
                     $data['pw'] = $pwdlib->createPasswordHash($passwordClear);
@@ -766,7 +847,8 @@ function identifyUser(
                         DB::update(
                             prefix_table('users'),
                             array(
-                                'pw' => $data['pw']
+                                'pw' => $data['pw'],
+                                'login' => $data['login']
                             ),
                             "id = %i",
                             $data['id']
@@ -800,7 +882,7 @@ function identifyUser(
     // Check Yubico
     if (isset($SETTINGS['yubico_authentication'])
         && $SETTINGS['yubico_authentication'] === "1"
-        && $data['admin'] !== "1"
+        && ($data['admin'] !== "1" || ((int) $SETTINGS['admin_2fa_required'] === 1 && $data['admin'] === "1"))
         && $user_2fa_selection === 'yubico'
     ) {
         $yubico_key = htmlspecialchars_decode($dataReceived['yubico_key']);
@@ -846,7 +928,7 @@ function identifyUser(
     // Create new LDAP user if not existing in Teampass
     // Don't create it if option "only localy declared users" is enabled
     if ($counter == 0 && $ldapConnection === true && isset($SETTINGS['ldap_elusers'])
-        && ($SETTINGS['ldap_elusers'] == 0)
+        && ((int) $SETTINGS['ldap_elusers'] === 0)
     ) {
         // If LDAP enabled, create user in TEAMPASS if doesn't exist
 
@@ -855,7 +937,7 @@ function identifyUser(
             //Because we didn't use adLDAP, we need to set the user info from the ldap_get_entries result
             $user_info_from_ad = $result;
         } else {
-            $user_info_from_ad = $adldap->user()->info($auth_username, array("mail", "givenname", "sn"));
+            $user_info_from_ad = $adldap->user()->info($auth_username, array("mail", "givenname", "sn", "useraccountcontrol"));
         }
 
         DB::insert(
@@ -880,8 +962,9 @@ function identifyUser(
             )
         );
         $newUserId = DB::insertId();
+        $_SESSION['user_id'] = $newUserId;
         // Create personnal folder
-        if (isset($SETTINGS['enable_pf_feature']) === true && $SETTINGS['enable_pf_feature'] === "1") {
+        if (isset($SETTINGS['enable_pf_feature']) === true && (int) $SETTINGS['enable_pf_feature'] === 1) {
             DB::insert(
                 prefix_table("nested_tree"),
                 array(
@@ -892,6 +975,12 @@ function identifyUser(
                     'personal_folder' => '1'
                 )
             );
+            
+            // Rebuild tree
+            $tree = new SplClassLoader('Tree\NestedTree', $SETTINGS['cpassman_dir'].'/includes/libraries');
+            $tree->register();
+            $tree = new Tree\NestedTree\NestedTree(prefix_table("nested_tree"), 'id', 'parent_id', 'title');
+            $tree->rebuild();
         }
         $proceedIdentification = true;
         $user_initial_creation_through_ldap = true;
@@ -914,7 +1003,7 @@ function identifyUser(
     // check GA code
     if (isset($SETTINGS['google_authentication']) === true
         && $SETTINGS['google_authentication'] === '1'
-        && $username !== "admin"
+        && ($username !== "admin" || ((int) $SETTINGS['admin_2fa_required'] === 1 && $username === "admin"))
         && $user_2fa_selection === 'google'
     ) {
         if (isset($dataReceived['GACode']) && empty($dataReceived['GACode']) === false) {
@@ -946,7 +1035,7 @@ function identifyUser(
                         $data['id']
                     );
 
-                    echo '[{"value" : "<img src=\"'.$new_2fa_qr.'\">", "user_admin":"', /** @scrutinizer ignore-type */ isset($_SESSION['user_admin']) ? $antiXss->xss_clean($_SESSION['user_admin']) : "", '", "initial_url" : "'.@$_SESSION['initial_url'].'", "error" : "'.$logError.'"}]';
+                    echo '[{"value" : "<img src=\"'.$new_2fa_qr.'\">", "user_admin":"', isset($_SESSION['user_admin']) ? $antiXss->xss_clean($_SESSION['user_admin']) : "", '", "initial_url" : "'.@$_SESSION['initial_url'].'", "error" : "'.$logError.'"}]';
 
                     exit();
                 }
@@ -978,7 +1067,7 @@ function identifyUser(
     // check AGSES code
     if (isset($SETTINGS['agses_authentication_enabled']) === true
         && $SETTINGS['agses_authentication_enabled'] === '1'
-        && $username !== "admin"
+        && ($username !== "admin" || ((int) $SETTINGS['admin_2fa_required'] === 1 && $username === "admin"))
         && $user_2fa_selection === 'agses'
         && empty($user_agses_code) === false
     ) {
@@ -1085,14 +1174,30 @@ function identifyUser(
             if ($pwdlib->verifyPasswordHash($passwordClear, $data['pw']) === true) {
                 $userPasswordVerified = true;
             } else {
-                $userPasswordVerified = false;
-                logEvents(
-                    'failed_auth',
-                    'user_password_not_correct',
-                    "",
-                    "",
-                    stripslashes($username)
-                );
+                // 2.1.27.24 - manage passwords
+                $passwordClearSanitized = htmlspecialchars_decode($dataReceived['pw_sanitized']);
+
+                if ($pwdlib->verifyPasswordHash($passwordClearSanitized, $data['pw']) === true) {
+                    // then the auth is correct but needs to be adapted in DB since change of encoding
+                    $data['pw'] = $pwdlib->createPasswordHash($passwordClear);
+                    DB::update(
+                        prefix_table('users'),
+                        array(
+                            'pw' => $data['pw']
+                        ),
+                        "id=%i",
+                        $data['id']
+                    );
+                } else {
+                    $userPasswordVerified = false;
+                    logEvents(
+                        'failed_auth',
+                        'user_password_not_correct',
+                        "",
+                        "",
+                        stripslashes($username)
+                    );
+                }
             }
         }
 
@@ -1201,15 +1306,16 @@ function identifyUser(
             $_SESSION['fin_session'] = (integer) (time() + $_SESSION['user_settings']['session_duration']);
 
             /* If this option is set user password MD5 is used as personal SALTKey */
-            if (isset($SETTINGS['use_md5_password_as_salt']) &&
-                $SETTINGS['use_md5_password_as_salt'] == 1
+            if (isset($SETTINGS['use_md5_password_as_salt'])
+                && $SETTINGS['use_md5_password_as_salt'] == 1
             ) {
                 $_SESSION['user_settings']['clear_psk'] = md5($passwordClear);
-                $tmp = encrypt($_SESSION['user_settings']['clear_psk'], "");
-                if ($tmp !== false) {
+                //$tmp = encrypt($_SESSION['user_settings']['clear_psk'], "");
+                $encryptedPSK = cryption($passwordClear, '', 'encrypt');
+                if (empty($encryptedPSK['string']) === false) {
                     setcookie(
                         "TeamPass_PFSK_".md5($_SESSION['user_id']),
-                        $tmp,
+                        $encryptedPSK['string'],
                         time() + 60 * 60 * 24 * $SETTINGS['personal_saltkey_cookie_duration'],
                         '/'
                     );
@@ -1296,39 +1402,20 @@ function identifyUser(
             }
 
             // Get user's rights
-            if ($user_initial_creation_through_ldap === false) {
-                identifyUserRights(
-                    $data['groupes_visibles'],
-                    $_SESSION['groupes_interdits'],
-                    $data['admin'],
-                    $data['fonction_id'],
-                    $server,
-                    $user,
-                    $pass,
-                    $database,
-                    $port,
-                    $encoding,
-                    $SETTINGS
-                );
-            } else {
-                // is new LDAP user. Show only his personal folder
-                if ($SETTINGS['enable_pf_feature'] === '1') {
-                    $_SESSION['personal_visible_groups'] = array($data['id']);
-                    $_SESSION['personal_folders'] = array($data['id']);
-                } else {
-                    $_SESSION['personal_visible_groups'] = array();
-                    $_SESSION['personal_folders'] = array();
-                }
-                $_SESSION['all_non_personal_folders'] = array();
-                $_SESSION['groupes_visibles'] = array();
-                $_SESSION['groupes_visibles_list'] = "";
-                $_SESSION['read_only_folders'] = array();
-                $_SESSION['list_folders_limited'] = "";
-                $_SESSION['list_folders_editable_by_role'] = array();
-                $_SESSION['list_restricted_folders_for_items'] = array();
-                $_SESSION['nb_folders'] = 1;
-                $_SESSION['nb_roles'] = 0;
-            }
+            identifyUserRights(
+                $data['groupes_visibles'],
+                $_SESSION['groupes_interdits'],
+                $data['admin'],
+                $data['fonction_id'],
+                $server,
+                $user,
+                $pass,
+                $database,
+                $port,
+                $encoding,
+                $SETTINGS
+            );
+
             // Get some more elements
             $_SESSION['screenHeight'] = $dataReceived['screenHeight'];
             // Get last seen items

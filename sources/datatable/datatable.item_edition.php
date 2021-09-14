@@ -3,7 +3,7 @@
  * @package       datatable.item_edition.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -22,6 +22,18 @@ if (file_exists('../../includes/config/tp.config.php')) {
     require_once '../../includes/config/tp.config.php';
 } else {
     throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
+}
+
+/* do checks */
+require_once $SETTINGS['cpassman_dir'].'/sources/checks.php';
+if (checkUser($_SESSION['user_id'], $_SESSION['key'], "manage_users") === false) {
+    $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
+    die('Hacking attempt...');
+}
+
+if (isset($_GET['token']) === false || $_GET['token'] !== $_SESSION["key"]) {
+    $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
+    die('Hacking attempt...');
 }
 
 require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';

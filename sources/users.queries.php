@@ -4,7 +4,7 @@
  * @package       users.queries.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link         * @package       
  *
@@ -93,14 +93,18 @@ if (null !== filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
             );
 
             // Prepare variables
-            $login = filter_var(htmlspecialchars_decode($dataReceived['login']), FILTER_SANITIZE_STRING);
-            $email = filter_var(htmlspecialchars_decode($dataReceived['email']), FILTER_SANITIZE_STRING);
-            $lastname = filter_var(htmlspecialchars_decode($dataReceived['lastname']), FILTER_SANITIZE_STRING);
-            $name = filter_var(htmlspecialchars_decode($dataReceived['name']), FILTER_SANITIZE_STRING);
-            $pw = filter_var(htmlspecialchars_decode($dataReceived['pw']), FILTER_SANITIZE_STRING);
+            $login = filter_var(($dataReceived['login']), FILTER_SANITIZE_STRING);
+            $email = filter_var(($dataReceived['email']), FILTER_SANITIZE_STRING);
+            $lastname = filter_var(($dataReceived['lastname']), FILTER_SANITIZE_STRING);
+            $name = filter_var(($dataReceived['name']), FILTER_SANITIZE_STRING);
+            if (array_key_exists('pw', $dataReceived)) {
+                $pw = filter_var(($dataReceived['pw']), FILTER_SANITIZE_STRING);
+            } else {
+                $pw = '';
+            }
 
             // Empty user
-            if (mysqli_escape_string($link, htmlspecialchars_decode($login)) == "") {
+            if (mysqli_escape_string($link, ($login)) == "") {
                 echo '[ { "error" : "'.addslashes($LANG['error_empty_data']).'" } ]';
                 break;
             }
@@ -219,13 +223,17 @@ if (null !== filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
                 );
 
                 // get links url
-                if (empty($SETTINGS['email_server_url'])) {
+                if (empty($SETTINGS['email_server_url']) === true) {
                     $SETTINGS['email_server_url'] = $SETTINGS['cpassman_url'];
                 }
                 // Send email to new user
                 sendEmail(
                     $LANG['email_subject_new_user'],
-                    str_replace(array('#tp_login#', '#tp_pw#', '#tp_link#'), array(" ".addslashes($login), addslashes($pw), $SETTINGS['email_server_url']), $LANG['email_new_user_mail']),
+                    str_replace(
+                        array('#tp_login#', '#tp_pw#', '#tp_link#'),
+                        array(" ".addslashes($login), addslashes($pw), $SETTINGS['email_server_url']),
+                        $LANG['email_new_user_mail']
+                    ),
                     $dataReceived['email'],
                     $LANG,
                     $SETTINGS
@@ -982,7 +990,7 @@ if (null !== filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
                 foreach ($rows as $record) {
                     if ($_SESSION['is_admin'] === '1'
                         || (($_SESSION['user_manager'] === '1' || $_SESSION['user_can_manage_all_users'] === "1")
-                        && (in_array($record['id'], $my_functions) || $record['creator_id'] == $_SESSION['user_id']))
+                        && (in_array($record['id'], $my_functions) || in_array($record['id'], $users_functions) || $record['creator_id'] == $_SESSION['user_id']))
                     ) {
                         if (in_array($record['id'], $users_functions)) {
                             $tmp = ' selected="selected"';
@@ -1540,19 +1548,18 @@ if (null !== filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
             }
 
             foreach ($rows as $record) {
-                $list_users_from .= '<option id="share_from-'.$record['id'].'">'.$record['name'].' '.$record['lastname'].' ['.$record['login'].']</option>';
-                $list_users_to .= '<option id="share_to-'.$record['id'].'">'.$record['name'].' '.$record['lastname'].' ['.$record['login'].']</option>';
+                $list_users_from .= '<option id="share_from-'.$record['id'].'" data-id="'.$record['id'].'">'.$record['name'].' '.$record['lastname'].' ['.$record['login'].']</option>';
+                $list_users_to .= '<option id="share_to-'.$record['id'].'" data-id="'.$record['id'].'">'.$record['name'].' '.$record['lastname'].' ['.$record['login'].']</option>';
             }
-
-            $return_values = prepareExchangedData(
+            
+            echo prepareExchangedData(
                 array(
-                    'users_list_from' => $list_users_from,
-                    'users_list_to' => $list_users_to,
+                    'users_list_from' => cleanText($list_users_from),
+                    'users_list_to' => cleanText($list_users_to),
                     'error' => ''
                 ),
                 "encode"
             );
-            echo $return_values;
 
             break;
 
@@ -1636,61 +1643,97 @@ if (null !== filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
     $value = explode('_', filter_input(INPUT_POST, 'id', FILTER_SANITIZE_STRING));
     $post_newValue = filter_input(INPUT_POST, 'newValue', FILTER_SANITIZE_STRING);
 
-    if ($value[0] === "userlanguage") {
-        $value[0] = "user_language";
-        $post_newValue = strtolower($post_newValue);
-    }
-    DB::update(
-        prefix_table("users"),
-        array(
-            $value[0] => $post_newValue
-            ),
-        "id = %i",
+    // Get info about user
+    $data_user = DB::queryfirstrow(
+        "SELECT admin, isAdministratedByRole FROM ".prefix_table("users")."
+        WHERE id = %i",
         $value[1]
     );
-    // update LOG
-    logEvents(
-        'user_mngt',
-        'at_user_new_'.$value[0].':'.$value[1],
-        $_SESSION['user_id'],
-        $_SESSION['login'],
-        filter_input(INPUT_POST, 'id', FILTER_SANITIZE_STRING)
-    );
-    // refresh SESSION if requested
-    if ($value[0] === "treeloadstrategy") {
-        $_SESSION['user_settings']['treeloadstrategy'] = $post_newValue;
-    } elseif ($value[0] === "usertimezone") {
-    // special case for usertimezone where session needs to be updated
-        $_SESSION['user_settings']['usertimezone'] = $post_newValue;
-    } elseif ($value[0] === "userlanguage") {
-    // special case for user_language where session needs to be updated
-        $_SESSION['user_settings']['user_language'] = $post_newValue;
-        $_SESSION['user_language'] = $post_newValue;
-    } elseif ($value[0] === "agses-usercardid") {
-    // special case for agsescardid where session needs to be updated
-        $_SESSION['user_settings']['agses-usercardid'] = $post_newValue;
-    } elseif ($value[0] === "email") {
-    // store email change in session
-        $_SESSION['user_email'] = $post_newValue;
+
+    // Is this user allowed to do this?
+    if ($_SESSION['is_admin'] === "1"
+        || (in_array($data_user['isAdministratedByRole'], $_SESSION['user_roles']))
+        || ($_SESSION['user_can_manage_all_users'] === "1" && $data_user['admin'] !== "1")
+        || ($_SESSION['user_id'] === $value[1])
+    ) {
+        if ($value[0] === "userlanguage") {
+            $value[0] = "user_language";
+            $post_newValue = strtolower($post_newValue);
+        }
+        // Check that operation is allowed
+        if (in_array(
+            $value[0],
+            array('login', 'pw', 'email', 'treeloadstrategy', 'usertimezone', 'user_api_key', 'yubico_user_key', 'yubico_user_id', 'agses-usercardid', 'user_language', 'psk')
+        )
+        ) {
+            DB::update(
+                prefix_table("users"),
+                array(
+                    $value[0] => $post_newValue
+                    ),
+                "id = %i",
+                $value[1]
+            );
+            // update LOG
+            logEvents(
+                'user_mngt',
+                'at_user_new_'.$value[0].':'.$value[1],
+                $_SESSION['user_id'],
+                $_SESSION['login'],
+                filter_input(INPUT_POST, 'id', FILTER_SANITIZE_STRING)
+            );
+            // refresh SESSION if requested
+            if ($value[0] === "treeloadstrategy") {
+                $_SESSION['user_settings']['treeloadstrategy'] = $post_newValue;
+            } elseif ($value[0] === "usertimezone") {
+            // special case for usertimezone where session needs to be updated
+                $_SESSION['user_settings']['usertimezone'] = $post_newValue;
+            } elseif ($value[0] === "userlanguage") {
+            // special case for user_language where session needs to be updated
+                $_SESSION['user_settings']['user_language'] = $post_newValue;
+                $_SESSION['user_language'] = $post_newValue;
+            } elseif ($value[0] === "agses-usercardid") {
+            // special case for agsescardid where session needs to be updated
+                $_SESSION['user_settings']['agses-usercardid'] = $post_newValue;
+            } elseif ($value[0] === "email") {
+            // store email change in session
+                $_SESSION['user_email'] = $post_newValue;
+            }
+            // Display info
+            echo htmlentities($post_newValue, ENT_QUOTES);
+        }
     }
-    // Display info
-    echo htmlentities($post_newValue, ENT_QUOTES);
 // # ADMIN FOR USER HAS BEEN DEFINED ##
 } elseif (null !== filter_input(INPUT_POST, 'newadmin', FILTER_SANITIZE_NUMBER_INT)) {
     $id = explode('_', filter_input(INPUT_POST, 'id', FILTER_SANITIZE_STRING));
-    DB::update(
-        prefix_table("users"),
-        array(
-            'admin' => filter_input(INPUT_POST, 'newadmin', FILTER_SANITIZE_NUMBER_INT)
-            ),
-        "id = %i",
-        $id[1]
+
+    // Get info about user
+    $data_user = DB::queryfirstrow(
+        "SELECT admin, isAdministratedByRole FROM ".prefix_table("users")."
+        WHERE id = %i",
+        $value[1]
     );
-    // Display info
-    if (filter_input(INPUT_POST, 'newadmin', FILTER_SANITIZE_NUMBER_INT) === 1) {
-        echo "Oui";
-    } else {
-        echo "Non";
+
+    // Is this user allowed to do this?
+    if ($_SESSION['is_admin'] === "1"
+        || (in_array($data_user['isAdministratedByRole'], $_SESSION['user_roles']))
+        || ($_SESSION['user_can_manage_all_users'] === "1" && $data_user['admin'] !== "1")
+        || ($_SESSION['user_id'] === $value[1])
+    ) {
+        DB::update(
+            prefix_table("users"),
+            array(
+                'admin' => filter_input(INPUT_POST, 'newadmin', FILTER_SANITIZE_NUMBER_INT)
+                ),
+            "id = %i",
+            $id[1]
+        );
+        // Display info
+        if (filter_input(INPUT_POST, 'newadmin', FILTER_SANITIZE_NUMBER_INT) === 1) {
+            echo "Oui";
+        } else {
+            echo "Non";
+        }
     }
 }
 

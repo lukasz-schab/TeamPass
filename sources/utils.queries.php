@@ -3,7 +3,7 @@
  * @package       utils.queries.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -446,7 +446,11 @@ if (null !== $post_type) {
                 } else {
                     // send ssh script for user change
                     $ret .= "<br />".$LANG['ssh_answer_from_server'].':&nbsp;<div style="margin-left:20px;font-style: italic;">';
-                    $ret_server = $ssh->exec('echo -e "'.$dataReceived['new_pwd'].'\n'.$dataReceived['new_pwd'].'" | passwd '.$dataItem['login']);
+                    if ("root" === $dataReceived['ssh_root']) {
+                        $ret_server = $ssh->exec('echo -e "'.$dataReceived['new_pwd'].'\n'.$dataReceived['new_pwd'].'" | passwd '.$dataItem['login']);
+                    } else {
+                        $ret_server = $ssh->exec('echo -e "'.$dataReceived['ssh_pwd'].'\n'.$dataReceived['new_pwd'].'\n'.$dataReceived['new_pwd'].'" | passwd '.$dataItem['login']);
+                    }
                     if (strpos($ret_server, "updated successfully") !== false) {
                         $err = false;
                     } else {

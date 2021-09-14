@@ -4,7 +4,7 @@
  * @package       main.queries.php
  * @author        Nils Laumaillé <nils@teampass.net>
  * @version       2.1.27
- * @copyright     2009-2018 Nils Laumaillé
+ * @copyright     2009-2019 Nils Laumaillé
  * @license       GNU GPL-3.0
  * @link          https://www.teampass.net
  *
@@ -102,7 +102,8 @@ function mainQuery()
             $pwdlib = new PasswordLib\PasswordLib();
 
             // Prepare variables
-            $newPw = $pwdlib->createPasswordHash(htmlspecialchars_decode($dataReceived['new_pw']));
+            //$newPw = $pwdlib->createPasswordHash(htmlspecialchars_decode($dataReceived['new_pw']));
+            $newPw = $pwdlib->createPasswordHash($dataReceived['new_pw']);
 
             // User has decided to change is PW
             if (null !== filter_input(INPUT_POST, 'change_pw_origine', FILTER_SANITIZE_STRING)
@@ -110,12 +111,17 @@ function mainQuery()
                 && $_SESSION['user_admin'] !== "1"
             ) {
                 // check if expected security level is reached
-                $data_roles = DB::queryfirstrow("SELECT fonction_id FROM ".prefix_table("users")." WHERE id = %i", $_SESSION['user_id']);
+                $data_roles = DB::queryfirstrow(
+                    "SELECT fonction_id
+                    FROM ".prefix_table("users")."
+                    WHERE id = %i",
+                    $_SESSION['user_id']
+                );
 
                 // check if badly written
                 $data_roles['fonction_id'] = array_filter(explode(',', str_replace(';', ',', $data_roles['fonction_id'])));
+                $data_roles['fonction_id'] = implode(';', $data_roles['fonction_id']);
                 if ($data_roles['fonction_id'][0] === "") {
-                    $data_roles['fonction_id'] = implode(';', $data_roles['fonction_id']);
                     DB::update(
                         prefix_table("users"),
                         array(
@@ -129,7 +135,7 @@ function mainQuery()
                 $data = DB::query(
                     "SELECT complexity
                     FROM ".prefix_table("roles_title")."
-                    WHERE id IN (".implode(',', $data_roles['fonction_id']).")
+                    WHERE id IN (".str_replace(';', ',', $data_roles['fonction_id']).")
                     ORDER BY complexity DESC"
                 );
                 if (intval(filter_input(INPUT_POST, 'complexity', FILTER_SANITIZE_NUMBER_INT)) < intval($data[0]['complexity'])) {
@@ -141,7 +147,7 @@ function mainQuery()
                 $lastPw = explode(';', $_SESSION['last_pw']);
                 // if size is bigger then clean the array
                 if (sizeof($lastPw) > $SETTINGS['number_of_used_pw']
-                        && $SETTINGS['number_of_used_pw'] > 0
+                    && $SETTINGS['number_of_used_pw'] > 0
                 ) {
                     for ($x_counter = 0; $x_counter < $SETTINGS['number_of_used_pw']; $x_counter++) {
                         unset($lastPw[$x_counter]);
@@ -184,7 +190,8 @@ function mainQuery()
                 $_SESSION['validite_pw'] = true;
 
                 // BEfore updating, check that the pwd is correct
-                if ($pwdlib->verifyPasswordHash(htmlspecialchars_decode($dataReceived['new_pw']), $newPw) === true) {
+                //if ($pwdlib->verifyPasswordHash(htmlspecialchars_decode($dataReceived['new_pw']), $newPw) === true) {
+                if ($pwdlib->verifyPasswordHash($dataReceived['new_pw'], $newPw) === true) {
                     // update DB
                     DB::update(
                         prefix_table("users"),
@@ -225,7 +232,8 @@ function mainQuery()
                 }
 
                 // BEfore updating, check that the pwd is correct
-                if ($pwdlib->verifyPasswordHash(htmlspecialchars_decode($dataReceived['new_pw']), $newPw) === true) {
+                //if ($pwdlib->verifyPasswordHash(htmlspecialchars_decode($dataReceived['new_pw']), $newPw) === true) {
+                if ($pwdlib->verifyPasswordHash($dataReceived['new_pw'], $newPw) === true) {
                     // adapt
                     if (filter_input(INPUT_POST, 'change_pw_origine', FILTER_SANITIZE_STRING) === "user_change") {
                         $dataReceived['user_id'] = $_SESSION['user_id'];
@@ -246,21 +254,23 @@ function mainQuery()
                     logEvents('user_mngt', 'at_user_pwd_changed', $_SESSION['user_id'], $_SESSION['login'], $dataReceived['user_id']);
 
                     //Send email to user
-                    if (filter_input(INPUT_POST, 'change_pw_origine', FILTER_SANITIZE_STRING) !== "admin_change") {
+                    if (filter_input(INPUT_POST, 'change_pw_origine', FILTER_SANITIZE_STRING) === "admin_change") {
                         $row = DB::queryFirstRow(
                             "SELECT email FROM ".prefix_table("users")."
                             WHERE id = %i",
                             $dataReceived['user_id']
                         );
-                        if (!empty($row['email']) && isset($SETTINGS['enable_email_notification_on_user_pw_change']) && $SETTINGS['enable_email_notification_on_user_pw_change'] == 1) {
+                        if (!empty($row['email']) && isset($SETTINGS['enable_email_notification_on_user_pw_change']) && (int) $SETTINGS['enable_email_notification_on_user_pw_change'] === 1) {
                             sendEmail(
                                 $LANG['forgot_pw_email_subject'],
                                 $LANG['forgot_pw_email_body']." ".htmlspecialchars_decode($dataReceived['new_pw']),
-                                $row[0],
+                                $row['email'],
                                 $LANG,
                                 $SETTINGS,
                                 $LANG['forgot_pw_email_altbody_1']." ".htmlspecialchars_decode($dataReceived['new_pw'])
                             );
+
+                            //print_r($ret);
                         }
                     }
 
@@ -362,7 +372,7 @@ function mainQuery()
                     $ldap_user_never_auth = true;
                 }
             }
-
+            
             // Do treatment
             if ($counter === 0) {
                 // Not a registered user !
@@ -457,7 +467,7 @@ function mainQuery()
                     }
 
                     // send back
-                    echo '[{ "error" : "0" , "email" : "'.$data['email'].'" , "msg" : "'.str_replace("#email#", "<b>".obfuscate_email($data['email'])."</b>", addslashes($LANG['admin_email_result_ok'])).'"}]';
+                    echo '[{ "error" : "0" , "email" : "'.$data['email'].'" , "msg" : "'.str_replace("#email#", "<b>".obfuscateEmail($data['email'])."</b>", addslashes($LANG['admin_email_result_ok'])).'"}]';
                 }
             }
             break;
@@ -578,7 +588,7 @@ function mainQuery()
             // Prepare variables
             $login = htmlspecialchars_decode($dataReceived['login']);
             $key = htmlspecialchars_decode($dataReceived['key']);
-
+            
             // check if key is okay
             $data = DB::queryFirstRow(
                 "SELECT valeur FROM ".prefix_table("misc")." WHERE intitule = %s AND type = %s",
@@ -1349,6 +1359,21 @@ function mainQuery()
                         $line = str_replace($url_found, $anonym_url, $line);
                     }
 
+                    // Clear email password
+                    if (strpos($line, 'email_auth_pwd') > 0) {
+                        $line = "'email_auth_pwd' => '<removed>'\n";
+                    }
+
+                    // Clear agses_hosted_apikey
+                    if (strpos($line, 'agses_hosted_apikey') > 0) {
+                        $line = "'agses_hosted_apikey' => '<removed>'\n";
+                    }
+
+                    // Clear ldap_bind_passwd
+                    if (strpos($line, 'ldap_bind_passwd') > 0) {
+                        $line = "'ldap_bind_passwd' => '<removed>'\n";
+                    }
+
                     // Clear bck_script_passkey
                     if (strpos($line, 'bck_script_passkey') > 0) {
                         $line = "'bck_script_passkey' => '<removed>'\n";
@@ -1478,6 +1503,74 @@ Insert the log here and especially the answer of the query that failed.
                 if ($field === 'user_api_key') {
                     $_SESSION['user_settings']['api-key'] = $new_value;
                 }
+            break;
+
+        /**
+         * STORE USER LOCATION
+         */
+        case "save_user_location":
+            // Check KEY
+            if (filter_input(INPUT_POST, 'key', FILTER_SANITIZE_STRING) !== filter_var($_SESSION['key'], FILTER_SANITIZE_STRING)) {
+                echo prepareExchangedData(array("error" => "not_allowed", "error_text" => addslashes($LANG['error_not_allowed_to'])), "encode");
+                break;
+            }
+
+
+            // Manage 1st step - is this needed?
+            if (filter_input(INPUT_POST, 'step', FILTER_SANITIZE_STRING) === "refresh") {
+                $record = DB::queryFirstRow(
+                    "SELECT user_ip_lastdate
+                    FROM ".prefix_table("users")."
+                    WHERE id = %i",
+                    $_SESSION['user_id']
+                );
+
+                if (empty($record['user_ip_lastdate']) === true
+                    || (time() - $record['user_ip_lastdate']) > $SETTINGS_EXT['one_day_seconds']
+                ) {
+                    echo prepareExchangedData(
+                        array(
+                            'refresh' => true,
+                            'error' => ''
+                        ),
+                        "encode"
+                    );
+                    break;
+                }
+            } elseif (filter_input(INPUT_POST, 'step', FILTER_SANITIZE_STRING) === "perform") {
+                $post_location = filter_input(INPUT_POST, 'location', FILTER_SANITIZE_STRING);
+                if (empty($post_location) === false) {
+                    DB::update(
+                        prefix_table("users"),
+                        array(
+                            'user_ip' => $post_location,
+                            'user_ip_lastdate' => time()
+                            ),
+                        "id = %i",
+                        $_SESSION['user_id']
+                    );
+
+                    echo prepareExchangedData(
+                        array(
+                            'refresh' => false,
+                            'error' => ''
+                        ),
+                        "encode"
+                    );
+                    break;
+                }
+            } else {
+
+            }
+
+            echo prepareExchangedData(
+                array(
+                    'refresh' => '',
+                    'error' => ''
+                ),
+                "encode"
+            );
+
             break;
     }
 }
