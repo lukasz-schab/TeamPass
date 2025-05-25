@@ -1,107 +1,112 @@
 <?php
+
+declare(strict_types=1);
+
 /**
- * @package       error.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      error.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
 
+use TeampassClasses\SessionManager\SessionManager;
+use TeampassClasses\Language\Language;
+use TeampassClasses\ConfigManager\ConfigManager;
 
-if (file_exists('../sources/SecureHandler.php')) {
-    require_once '../sources/SecureHandler.php';
-} elseif (file_exists('./sources/SecureHandler.php')) {
-    require_once './sources/SecureHandler.php';
-} else {
-    throw new Exception("Error file '/sources/SecureHandler.php' not exists", 1);
-}
-if (!isset($_SESSION)) {
-    session_start();
-}
-if (!isset($_SESSION['CPM']) || $_SESSION['CPM'] != 1) {
-    die('Hacking attempt...');
-}
+// Load functions
+require_once __DIR__.'/sources/main.functions.php';
+
+// init
+loadClasses('DB');
+$session = SessionManager::getSession();
+$lang = new Language($session->get('user-language') ?? 'english');
 
 // Load config
-if (file_exists('../includes/config/tp.config.php')) {
-    include_once '../includes/config/tp.config.php';
-} elseif (file_exists('./includes/config/tp.config.php')) {
-    include_once './includes/config/tp.config.php';
-} else {
-    throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
-}
+$configManager = new ConfigManager();
+$SETTINGS = $configManager->getAllSettings();
 
-if (null !== filter_input(INPUT_POST, 'session', FILTER_SANITIZE_STRING)
-    && filter_input(INPUT_POST, 'session', FILTER_SANITIZE_STRING) === "expired"
+// Define Timezone
+date_default_timezone_set($SETTINGS['timezone'] ?? 'UTC');
+
+// Set header properties
+header('Content-type: text/html; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+
+// --------------------------------- //
+
+if (
+    filter_input(INPUT_POST, 'session', FILTER_SANITIZE_FULL_SPECIAL_CHARS) !== null
+    && filter_input(INPUT_POST, 'session', FILTER_SANITIZE_FULL_SPECIAL_CHARS) === 'expired'
 ) {
-    //Include files
-    require_once $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-    require_once $SETTINGS['cpassman_dir'].'/includes/config/include.php';
-    require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';
-
-    // connect to DB
-    require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Database/Meekrodb/db.class.php';
-    $pass = defuse_return_decrypted($pass);
-    DB::$host = $server;
-    DB::$user = $user;
-    DB::$password = $pass;
-    DB::$dbName = $database;
-    DB::$port = $port;
-    DB::$encoding = $encoding;
-    DB::$error_handler = true;
-    $link = mysqli_connect($server, $user, $pass, $database, $port);
-    $link->set_charset($encoding);
-
-    // Include main functions used by TeamPass
-    require_once 'sources/main.functions.php';
-
     // Update table by deleting ID
-    if (isset($_SESSION['user_id'])) {
+    if ($session->has('user-id') && null !== $session->get('user-id')) {
         DB::update(
-            $pre."users",
-            array(
-                'key_tempo' => ''
-            ),
-            "id=%i",
-            $_SESSION['user_id']
+            DB_PREFIX . 'users',
+            [
+                'key_tempo' => '',
+            ],
+            'id=%i',
+            $session->get('user-id')
         );
     }
 
     //Log into DB the user's disconnection
-    if (isset($SETTINGS['log_connections']) && $SETTINGS['log_connections'] == 1) {
-        logEvents('user_connection', 'disconnection', $_SESSION['user_id'], $_SESSION['login']);
+    if (isset($SETTINGS['log_connections']) && (int) $SETTINGS['log_connections'] === 1) {
+        logEvents($SETTINGS, 'user_connection', 'disconnect', (string) $session->get('user-id'), $session->get('user-login'));
     }
 } else {
-    require_once $SETTINGS['cpassman_dir'].'/includes/language/english.php';
-    echo '
-    <div style="width:800px;margin:auto;">
-        <div class="ui-state-error ui-corner-all error" style="margin-top:60px; padding:15px; text-align:center; font-size:16px;" >
-            <i class="fa fa-warning fa-2x"></i><br /><br />';
+    $errorCode = '';
+    if (@$session->get('system-error_code') === ERR_NOT_ALLOWED) {
+        $errorCode = 'ERROR NOT ALLOWED';
+    } elseif (@$session->get('system-error_code') === ERR_NOT_EXIST) {
+        $errorCode = 'ERROR NOT EXISTS';
+    } elseif (@$session->get('system-error_code') === ERR_SESS_EXPIRED) {
+        $errorCode = 'ERROR SESSION EXPIRED';
+    } elseif (@$session->get('system-error_code') === ERR_VALID_SESSION) {
+        $errorCode = 'ERROR NOT ALLOWED';
+    } ?>
+    <!-- Main content -->
+    <section class="content">
+        <div class="error-page" style="width:100%;">
+            <h2 class="headline text-danger">500</h2>
 
-    if (@$_SESSION['error']['code'] === ERR_NOT_ALLOWED) {
-        echo $LANG['error_not_authorized'];
-    } elseif (@$_SESSION['error']['code'] === ERR_NOT_EXIST) {
-        echo $LANG['error_not_exists'];
-    } elseif (@$_SESSION['error']['code'] === ERR_SESS_EXPIRED) {
-        echo $LANG['index_session_expired'];
-    } elseif (@$_SESSION['error']['code'] === ERR_VALID_SESSION) {
-        echo $LANG['error_not_authorized'];
-    }
-    echo '
-            <br /><br /><a href="index.php" />'.$LANG['home'].'</a>
-        </div>';
+            <div class="error-content">
+                <h3><i class="fas fa-warning text-danger"></i> Oops! <?php echo $errorCode; ?>.</h3>
+
+                <p>
+                    For security reason, you have been disconnected. Click to <a href="./includes/core/logout.php?token=<?php echo $session->get('key'); ?>">log in</a>.
+                </p>
+
+            </div>
+            <!-- /.error-content -->
+        </div>
+        <!-- /.error-page -->
+    </section>
+    <!-- /.content -->
+<?php
 }
 
 // erase session table
-$_SESSION = array();
-
-// Kill session
-session_destroy();
-
-echo '
-</div>';
+$session->invalidate();
+die;
+?>

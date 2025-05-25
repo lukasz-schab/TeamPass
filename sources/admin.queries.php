@@ -1,346 +1,188 @@
 <?php
 
+declare(strict_types=1);
+
 /**
- * @package       admin.queries.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      admin.queries.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
 
-require_once 'SecureHandler.php';
-session_start();
-if (isset($_SESSION['CPM']) === false || $_SESSION['CPM'] != 1 ||
-    isset($_SESSION['user_id']) === false || empty($_SESSION['user_id']) ||
-    isset($_SESSION['key']) === false || empty($_SESSION['key'])
-) {
-    die('Hacking attempt...');
-}
+use TeampassClasses\SessionManager\SessionManager;
+use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
+use TeampassClasses\Language\Language;
+use TeampassClasses\PerformChecks\PerformChecks;
+use TeampassClasses\ConfigManager\ConfigManager;
+use TeampassClasses\NestedTree\NestedTree;
+use Duo\DuoUniversal\Client;
+use Duo\DuoUniversal\DuoException;
+use TeampassClasses\EmailService\EmailSettings;
+use TeampassClasses\EmailService\EmailService;
+
+// Load functions
+require_once 'main.functions.php';
+$session = SessionManager::getSession();
+$request = SymfonyRequest::createFromGlobals();
+loadClasses('DB');
+$lang = new Language($session->get('user-language') ?? 'english');
 
 // Load config
-if (file_exists('../includes/config/tp.config.php')) {
-    include_once '../includes/config/tp.config.php';
-} elseif (file_exists('./includes/config/tp.config.php')) {
-    include_once './includes/config/tp.config.php';
-} else {
-    throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
+$configManager = new ConfigManager();
+$SETTINGS = $configManager->getAllSettings();
+
+// Do checks
+// Instantiate the class with posted data
+$checkUserAccess = new PerformChecks(
+    dataSanitizer(
+        [
+            'type' => htmlspecialchars($request->request->get('type', ''), ENT_QUOTES, 'UTF-8'),
+        ],
+        [
+            'type' => 'trim|escape',
+        ],
+    ),
+    [
+        'user_id' => returnIfSet($session->get('user-id'), null),
+        'user_key' => returnIfSet($session->get('key'), null),
+    ]
+);
+// Handle the case
+echo $checkUserAccess->caseHandler();
+if ($checkUserAccess->checkSession() === false || $checkUserAccess->userAccessPage('admin') === false) {
+    // Not allowed page
+    $session->set('system-error_code', ERR_NOT_ALLOWED);
+    include $SETTINGS['cpassman_dir'] . '/error.php';
+    exit;
 }
 
-/* do checks */
-require_once $SETTINGS['cpassman_dir'].'/includes/config/include.php';
-require_once $SETTINGS['cpassman_dir'].'/sources/checks.php';
-if (!checkUser($_SESSION['user_id'], $_SESSION['key'], "manage_settings")) {
-    $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-    include $SETTINGS['cpassman_dir'].'/error.php';
-    exit();
-}
+// Define Timezone
+date_default_timezone_set($SETTINGS['timezone'] ?? 'UTC');
 
-require_once $SETTINGS['cpassman_dir'].'/includes/language/'.$_SESSION['user_language'].'.php';
-require_once $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-require_once $SETTINGS['cpassman_dir'].'/includes/config/tp.config.php';
+// Set header properties
+header('Content-type: text/html; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
 
-header("Content-type: text/html; charset=utf-8");
-header("Cache-Control: no-cache, no-store, must-revalidate");
+// --------------------------------- //
 
-require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';
 
-// connect to the server
-require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Database/Meekrodb/db.class.php';
-$pass = defuse_return_decrypted($pass);
-DB::$host = $server;
-DB::$user = $user;
-DB::$password = $pass;
-DB::$dbName = $database;
-DB::$port = $port;
-DB::$encoding = $encoding;
-DB::$error_handler = true;
-$link = mysqli_connect($server, $user, $pass, $database, $port);
-$link->set_charset($encoding);
-
-//Load Tree
-$tree = new SplClassLoader('Tree\NestedTree', '../includes/libraries');
-$tree->register();
-$tree = new Tree\NestedTree\NestedTree(prefix_table("nested_tree"), 'id', 'parent_id', 'title');
-
-//Load AES
-$aes = new SplClassLoader('Encryption\Crypt', '../includes/libraries');
-$aes->register();
-
-// Load AntiXSS
-require_once $SETTINGS['cpassman_dir'].'/includes/libraries/protect/AntiXSS/AntiXSS.php';
-$antiXss = new protect\AntiXSS\AntiXSS();
+// Load tree
+$tree = new NestedTree(prefixTable('nested_tree'), 'id', 'parent_id', 'title');
 
 // Prepare POST variables
-$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING);
-$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_STRING, FILTER_FLAG_NO_ENCODE_QUOTES);
-$post_key = filter_input(INPUT_POST, 'key', FILTER_SANITIZE_STRING);
-$post_session_key = filter_input(INPUT_POST, 'session_key', FILTER_SANITIZE_STRING);
+$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_FULL_SPECIAL_CHARS, FILTER_FLAG_NO_ENCODE_QUOTES);
+$post_key = filter_input(INPUT_POST, 'key', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 $post_id = filter_input(INPUT_POST, 'id', FILTER_SANITIZE_NUMBER_INT);
-$post_list = filter_input(INPUT_POST, 'list', FILTER_SANITIZE_STRING);
 $post_status = filter_input(INPUT_POST, 'status', FILTER_SANITIZE_NUMBER_INT);
-$post_label = filter_input(INPUT_POST, 'label', FILTER_SANITIZE_STRING);
-$post_action = filter_input(INPUT_POST, 'action', FILTER_SANITIZE_STRING);
+$post_label = filter_input(INPUT_POST, 'label', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_action = filter_input(INPUT_POST, 'action', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 $post_cpt = filter_input(INPUT_POST, 'cpt', FILTER_SANITIZE_NUMBER_INT);
-$post_object = filter_input(INPUT_POST, 'object', FILTER_SANITIZE_STRING);
+$post_object = filter_input(INPUT_POST, 'object', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 $post_start = filter_input(INPUT_POST, 'start', FILTER_SANITIZE_NUMBER_INT);
 $post_length = filter_input(INPUT_POST, 'length', FILTER_SANITIZE_NUMBER_INT);
-$post_option = filter_input(INPUT_POST, 'option', FILTER_SANITIZE_STRING);
+$post_option = filter_input(INPUT_POST, 'option', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 $post_nbItems = filter_input(INPUT_POST, 'nbItems', FILTER_SANITIZE_NUMBER_INT);
+$post_counter = filter_input(INPUT_POST, 'counter', FILTER_SANITIZE_NUMBER_INT);
+$post_list = filter_input(INPUT_POST, 'list', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 
 switch ($post_type) {
-    #CASE for getting informations about the tool
-    case "cpm_status":
-        $text = "<ul>";
-        $error = "";
-        if (!isset($SETTINGS_EXT['admin_no_info']) || (isset($SETTINGS_EXT['admin_no_info']) && $SETTINGS_EXT['admin_no_info'] == 0)) {
-            if (isset($SETTINGS['get_tp_info']) && $SETTINGS['get_tp_info'] == 1) {
-                // Get info about Teampass
-                if (isset($SETTINGS['proxy_ip']) === true && empty($SETTINGS['proxy_ip']) === false &&
-                    isset($SETTINGS['proxy_port']) === true && empty($SETTINGS['proxy_port']) === false
-                ) {
-                    $context = stream_context_create(
-                        array(
-                            'http' => array(
-                                'ignore_errors' => true,
-                                'proxy' =>  $SETTINGS['proxy_ip'].':'.$SETTINGS['proxy_port']
-                            )
-                        )
-                    );
-                } else {
-                    $context = stream_context_create(
-                        array(
-                            'http' => array(
-                                'ignore_errors' => true
-                            )
-                        )
-                    );
-                }
-                
-                $json = @file_get_contents('https://teampass.net/utils/teampass_info.json', false, $context);
-                if ($json !== false) {
-                    $json_array = json_decode($json, true);
-
-                    // About version
-                    $text .= '<li><u>'.$LANG['your_version']."</u> : ".$SETTINGS_EXT['version'];
-                    if (floatval($SETTINGS_EXT['version']) < floatval($json_array['info']['version'])) {
-                        $text .= '&nbsp;&nbsp;<b>'.$LANG['please_update'].'</b>';
-                    }
-                    $text .= '</li>';
-
-                    // Libraries
-                    $text .= '<li><u>Libraries</u> :</li>';
-                    foreach ($json_array['libraries'] as $key => $val) {
-                        $text .= "<li>&nbsp;<span class='fa fa-caret-right'></span>&nbsp;".$key." (<a href='".$val."' target='_blank'>".$val."</a>)</li>";
-                    }
-                }
-            } else {
-                $error = "conf_block";
-            }
-        } else {
-            $error = "conf_block";
-        }
-        $text .= "</ul>";
-
-        echo '[{"error":"'.$error.'" , "output":"'.str_replace(array("\n", "\t", "\r"), '', $text).'"}]';
-        break;
-
-    ###########################################################
-    #CASE for refreshing all Personal Folders
-    case "admin_action_check_pf":
-        //get through all users
-        $rows = DB::query(
-            "SELECT id, login, email
-            FROM ".prefix_table("users")."
-            ORDER BY login ASC"
-        );
-        foreach ($rows as $record) {
-            //update PF field for user
-            DB::update(
-                prefix_table("users"),
+    //##########################################################
+    //CASE for creating a DB backup
+    case 'admin_action_db_backup':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
                 array(
-                    'personal_folder' => '1'
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
                 ),
-                "id = %i",
-                $record['id']
+                'encode'
             );
-
-            //if folder doesn't exist then create it
-            $data = DB::queryfirstrow(
-                "SELECT id
-                FROM ".prefix_table("nested_tree")."
-                WHERE title = %s AND parent_id = %i",
-                $record['id'],
-                0
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
             );
-            $counter = DB::count();
-            if ($counter == 0) {
-                //If not exist then add it
-                DB::insert(
-                    prefix_table("nested_tree"),
-                    array(
-                        'parent_id' => '0',
-                        'title' => $record['id'],
-                        'personal_folder' => '1'
-                    )
-                );
-
-                //rebuild fuild tree folder
-                $tree->rebuild();
-            } else {
-                //If exists then update it
-                DB::update(
-                    prefix_table("nested_tree"),
-                    array(
-                        'personal_folder' => '1'
-                    ),
-                    "title=%s AND parent_id=%i",
-                    $record['id'],
-                    0
-                );
-                //rebuild fuild tree folder
-                $tree->rebuild();
-
-                // Get an array of all folders
-                $folders = $tree->getDescendants($data['id'], false, true, true);
-                foreach ($folders as $folder) {
-                    //update PF field for user
-                    DB::update(
-                        prefix_table("nested_tree"),
-                        array(
-                            'personal_folder' => '1'
-                        ),
-                        "id = %s",
-                        $folder
-                    );
-                }
-            }
+            break;
         }
 
-
-        echo '[{"result" : "pf_done"}]';
-        break;
-
-    ###########################################################
-    #CASE for deleting all items from DB that are linked to a folder that has been deleted
-    case "admin_action_db_clean_items":
-        //Libraries call
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
-
-        //init
-        $foldersIds = array();
-        $text = "";
-        $nbItemsDeleted = 0;
-
-        // Get an array of all folders
-        $folders = $tree->getDescendants();
-        foreach ($folders as $folder) {
-            if (!in_array($folder->id, $foldersIds)) {
-                array_push($foldersIds, $folder->id);
-            }
-        }
-
-        $items = DB::query("SELECT id,label FROM ".prefix_table("items")." WHERE id_tree NOT IN %li", $foldersIds);
-        foreach ($items as $item) {
-            $text .= $item['label']."[".$item['id']."] - ";
-            //Delete item
-            DB::DELETE(prefix_table("items"), "id = %i", $item['id']);
-
-            // Delete if template related to item
-            DB::delete(
-                $pre."templates",
-                "item_id = %i",
-                $item['id']
-            );
-
-            //log
-            DB::DELETE(prefix_table("log_items"), "id_item = %i", $item['id']);
-
-            $nbItemsDeleted++;
-        }
-
-        // delete orphan items
-        $rows = DB::query(
-            "SELECT id
-            FROM ".prefix_table("items")."
-            ORDER BY id ASC"
-        );
-        foreach ($rows as $item) {
-            DB::query(
-                "SELECT * FROM ".prefix_table("log_items")." WHERE id_item = %i AND action = %s",
-                $item['id'],
-                "at_creation"
-            );
-            $counter = DB::count();
-            if ($counter == 0) {
-                DB::DELETE(prefix_table("items"), "id = %i", $item['id']);
-                DB::DELETE(prefix_table("categories_items"), "item_id = %i", $item['id']);
-                DB::DELETE(prefix_table("log_items"), "id_item = %i", $item['id']);
-                $nbItemsDeleted++;
-            }
-        }
-
-        //Update CACHE table
-        updateCacheTable("reload");
-
-        //show some info
-        echo '[{"result" : "db_clean_items","nb_items_deleted":"'.$nbItemsDeleted.'"}]';
-        break;
-
-    ###########################################################
-    #CASE for creating a DB backup
-    case "admin_action_db_backup":
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
-        $return = "";
+        require_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
+        $return = '';
 
         //Get all tables
         $tables = array();
         $result = DB::query('SHOW TABLES');
         foreach ($result as $row) {
-            $tables[] = $row["Tables_in_".$database];
+            $tables[] = $row['Tables_in_' . DB_NAME];
         }
 
         //cycle through
         foreach ($tables as $table) {
-            if (empty($pre) || substr_count($table, $pre) > 0) {
+            if (defined('DB_PREFIX') || substr_count($table, DB_PREFIX) > 0) {
+                $table = (is_string($table) ? $table : strval($table));
                 // Do query
-                $result = DB::queryRaw('SELECT * FROM '.$table);
-                $mysqli_result = DB::queryRaw(
-                    "SELECT *
+                $result = DB::query('SELECT * FROM ' . $table);
+                DB::query(
+                    'SELECT *
                     FROM INFORMATION_SCHEMA.COLUMNS
                     WHERE table_schema = %s
-                    AND table_name = %s",
-                    $database,
+                    AND table_name = %s',
+                    DB_NAME,
                     $table
                 );
                 $numFields = DB::count();
 
                 // prepare a drop table
-                $return .= 'DROP TABLE '.$table.';';
-                $row2 = DB::queryfirstrow('SHOW CREATE TABLE '.$table);
-                $return .= "\n\n".$row2["Create Table"].";\n\n";
+                $return .= 'DROP TABLE ' . $table . ';';
+                $row2 = DB::queryFirstRow('SHOW CREATE TABLE ' . $table);
+                $return .= "\n\n" . strval($row2['Create Table']) . ";\n\n";
 
                 //prepare all fields and datas
-                for ($i = 0; $i < $numFields; $i++) {
-                    while ($row = $result->fetch_row()) {
-                        $return .= 'INSERT INTO '.$table.' VALUES(';
-                        for ($j = 0; $j < $numFields; $j++) {
-                            $row[$j] = addslashes($row[$j]);
-                            $row[$j] = preg_replace("/\n/", "\\n", $row[$j]);
-                            if (isset($row[$j])) {
-                                $return .= '"'.$row[$j].'"';
-                            } else {
-                                $return .= 'NULL';
+                for ($i = 0; $i < $numFields; ++$i) {
+                    if (is_object($result)) {
+                        while ($row = $result->fetch_row()) {
+                            $return .= 'INSERT INTO ' . $table . ' VALUES(';
+                            for ($j = 0; $j < $numFields; ++$j) {
+                                $row[$j] = addslashes($row[$j]);
+                                $row[$j] = preg_replace("/\n/", '\\n', $row[$j]);
+                                if (isset($row[$j])) {
+                                    $return .= '"' . $row[$j] . '"';
+                                } else {
+                                    $return .= 'NULL';
+                                }
+                                if ($j < ($numFields - 1)) {
+                                    $return .= ',';
+                                }
                             }
-                            if ($j < ($numFields - 1)) {
-                                $return .= ',';
-                            }
+                            $return .= ");\n";
                         }
-                        $return .= ");\n";
                     }
                 }
                 $return .= "\n\n\n";
@@ -349,11 +191,11 @@ switch ($post_type) {
 
         if (!empty($return)) {
             // get a token
-            $token = GenerateCryptKey(20);
+            $token = GenerateCryptKey(20, false, true, true, false, true);
 
             //save file
-            $filename = time().'-'.$token.'.sql';
-            $handle = fopen($SETTINGS['path_to_files_folder']."/".$filename, 'w+');
+            $filename = time() . '-' . $token . '.sql';
+            $handle = fopen($SETTINGS['path_to_files_folder'] . '/' . $filename, 'w+');
             if ($handle !== false) {
                 //write file
                 fwrite($handle, $return);
@@ -365,33 +207,55 @@ switch ($post_type) {
                 // Encrypt the file
                 prepareFileWithDefuse(
                     'encrypt',
-                    $SETTINGS['path_to_files_folder']."/".$filename,
-                    $SETTINGS['path_to_files_folder']."/defuse_temp_".$filename,
+                    $SETTINGS['path_to_files_folder'] . '/' . $filename,
+                    $SETTINGS['path_to_files_folder'] . '/defuse_temp_' . $filename,
                     $post_option
                 );
 
                 // Do clean
-                unlink($SETTINGS['path_to_files_folder']."/".$filename);
+                unlink($SETTINGS['path_to_files_folder'] . '/' . $filename);
                 rename(
-                    $SETTINGS['path_to_files_folder']."/defuse_temp_".$filename,
-                    $SETTINGS['path_to_files_folder']."/".$filename
+                    $SETTINGS['path_to_files_folder'] . '/defuse_temp_' . $filename,
+                    $SETTINGS['path_to_files_folder'] . '/' . $filename
                 );
             }
 
             //generate 2d key
-            $_SESSION['key_tmp'] = GenerateCryptKey(20, true);
+            $session->set('user-key_tmp', GenerateCryptKey(20, false, true, true, false, true));
 
             //update LOG
-            logEvents('admin_action', 'dataBase backup', $_SESSION['user_id'], $_SESSION['login']);
+            logEvents($SETTINGS, 'admin_action', 'dataBase backup', (string) $session->get('user-id'), $session->get('user-login'));
 
-            echo '[{"result":"db_backup" , "href":"sources/downloadFile.php?name='.urlencode($filename).'&sub=files&file='.$filename.'&type=sql&key='.$_SESSION['key'].'&key_tmp='.$_SESSION['key_tmp'].'&pathIsFiles=1"}]';
+            echo '[{"result":"db_backup" , "href":"sources/downloadFile.php?name=' . urlencode($filename) . '&sub=files&file=' . $filename . '&type=sql&key=' . $session->get('key') . '&key_tmp=' . $session->get('user-key_tmp') . '&pathIsFiles=1"}]';
         }
         break;
 
-    ###########################################################
-    #CASE for restoring a DB backup
-    case "admin_action_db_restore":
-        include_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
+        //##########################################################
+        //CASE for restoring a DB backup
+    case 'admin_action_db_restore':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        include_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
 
         $dataPost = explode('&', $post_option);
         $file = htmlspecialchars($dataPost[0]);
@@ -399,18 +263,18 @@ switch ($post_type) {
 
         // Get filename from database
         $data = DB::queryFirstRow(
-            "SELECT valeur
-            FROM ".$pre."misc
-            WHERE increment_id = %i",
+            'SELECT valeur
+            FROM ' . prefixTable('misc') . '
+            WHERE increment_id = %i',
             $file
         );
 
-        $file = $data['valeur'];
+        $file = is_string($data['valeur']) ? $data['valeur'] : '';
 
         // Delete operation id
         DB::delete(
-            prefix_table('misc'),
-            "increment_id = %i",
+            prefixTable('misc'),
+            'increment_id = %i',
             $file
         );
 
@@ -419,295 +283,261 @@ switch ($post_type) {
             // Decrypt the file
             $ret = prepareFileWithDefuse(
                 'decrypt',
-                $SETTINGS['path_to_files_folder']."/".$file,
-                $SETTINGS['path_to_files_folder']."/defuse_temp_".$file,
+                $SETTINGS['path_to_files_folder'] . '/' . $file,
+                $SETTINGS['path_to_files_folder'] . '/defuse_temp_' . $file,
                 $key
             );
 
-            if ($ret !== true) {
-                echo '[{"result":"db_restore" , "message":"'.$ret.'"}]';
+            if (empty($ret) === false) {
+                // deepcode ignore ServerLeak: $ret can only be an error string, so no important data here to be sent to client
+                echo '[{"result":"db_restore" , "message":"An error occurred ('.(string) $ret.')"}]';
                 break;
             }
 
             // Do clean
-            fileDelete($SETTINGS['path_to_files_folder']."/".$file);
-            $file = $SETTINGS['path_to_files_folder']."/defuse_temp_".$file;
+            fileDelete($SETTINGS['path_to_files_folder'] . '/' . $file, $SETTINGS);
+            $file = $SETTINGS['path_to_files_folder'] . '/defuse_temp_' . $file;
         } else {
-            $file = $SETTINGS['path_to_files_folder']."/".$file;
+            $file = $SETTINGS['path_to_files_folder'] . '/' . $file;
         }
 
         //read sql file
-        if ($handle = fopen($file, "r")) {
-            $query = "";
-            while (!feof($handle)) {
-                $query .= fgets($handle, 4096);
-                if (substr(rtrim($query), -1) == ';') {
-                    //launch query
-                    DB::queryRaw($query);
-                    $query = '';
-                }
+        $handle = fopen($file, 'r');
+        $query = '';
+        while (!feof($handle)) {
+            $query .= fgets($handle, 4096);
+            if (substr(rtrim($query), -1) === ';') {
+                //launch query
+                DB::query($query);
+                $query = '';
             }
-            fclose($handle);
         }
+        fclose($handle);
 
         //delete file
-        unlink($file);
+        unlink($SETTINGS['path_to_files_folder'] . '/' . $file);
 
         //Show done
         echo '[{"result":"db_restore" , "message":""}]';
         break;
 
-    ###########################################################
-    #CASE for optimizing the DB
-    case "admin_action_db_optimize":
+        //##########################################################
+        //CASE for optimizing the DB
+    case 'admin_action_db_optimize':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
+            break;
+        }
+
         //Get all tables
-        $alltables = DB::query("SHOW TABLES");
+        $alltables = DB::query('SHOW TABLES');
         foreach ($alltables as $table) {
             foreach ($table as $i => $tablename) {
-                if (substr_count($tablename, $pre) > 0) {
+                $tablename = (is_string($tablename) ? $tablename : strval($tablename));
+                if (substr_count($tablename, DB_PREFIX) > 0) {
                     // launch optimization quieries
-                    DB::query("ANALYZE TABLE `".$tablename."`");
-                    DB::query("OPTIMIZE TABLE `".$tablename."`");
+                    DB::query('ANALYZE TABLE `' . $tablename . '`');
+                    DB::query('OPTIMIZE TABLE `' . $tablename . '`');
                 }
             }
         }
 
         //Clean up LOG_ITEMS table
         $rows = DB::query(
-            "SELECT id
-            FROM ".prefix_table("items")."
-            ORDER BY id ASC"
+            'SELECT id
+            FROM ' . prefixTable('items') . '
+            ORDER BY id ASC'
         );
         foreach ($rows as $item) {
             DB::query(
-                "SELECT * FROM ".prefix_table("log_items")." WHERE id_item = %i AND action = %s",
+                'SELECT * FROM ' . prefixTable('log_items') . ' WHERE id_item = %i AND action = %s',
                 $item['id'],
-                "at_creation"
+                'at_creation'
             );
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 //Create new at_creation entry
                 $rowTmp = DB::queryFirstRow(
-                    "SELECT date FROM ".prefix_table("log_items")." WHERE id_item=%i ORDER BY date ASC",
+                    'SELECT date, id_user FROM ' . prefixTable('log_items') . ' WHERE id_item=%i ORDER BY date ASC',
                     $item['id']
                 );
                 DB::insert(
-                    prefix_table("log_items"),
+                    prefixTable('log_items'),
                     array(
-                        'id_item'     => $item['id'],
-                        'date'         => $rowTmp['date'] - 1,
-                        'id_user'     => "",
-                        'action'     => "at_creation",
-                        'raison'    => ""
+                        'id_item' => $item['id'],
+                        'date' => $rowTmp['date'] - 1,
+                        'id_user' => empty($rowTmp['id_user']) === true ? 1 : $rowTmp['id_user'],
+                        'action' => 'at_creation',
+                        'raison' => '',
                     )
                 );
             }
         }
 
-        //Show done
-        echo '[{"result":"db_optimize" , "message":""}]';
-        break;
-
-    ###########################################################
-    #CASE for deleted old files in folder "files"
-    case "admin_action_purge_old_files":
-        $nbFilesDeleted = 0;
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
-
-        //read folder
-        $dir = opendir($SETTINGS['path_to_files_folder']);
-
-        if ($dir !== false) {
-            //delete file FILES
-            while (false !== ($f = readdir($dir))) {
-                if ($f != "." && $f !== ".." && $f !== ".htaccess") {
-                    if ((time() - filectime($dir.$f)) > 604800) {
-                        fileDelete($SETTINGS['path_to_files_folder']."/".$f);
-                        $nbFilesDeleted++;
-                    }
-                }
-            }
-
-            //Close dir
-            closedir($dir);
-        }
-
-        //read folder  UPLOAD
-        $dir = opendir($SETTINGS['path_to_upload_folder']);
-
-        if ($dir !== false) {
-            //delete file
-            while (false !== ($f = readdir($dir))) {
-                if ($f != "." && $f !== "..") {
-                    if (strpos($f, "_delete.") > 0) {
-                        fileDelete($SETTINGS['path_to_upload_folder']."/".$f);
-                        $nbFilesDeleted++;
-                    }
-                }
-            }
-            //Close dir
-            closedir($dir);
-        }
+        // Log
+        logEvents(
+            $SETTINGS,
+            'system',
+            'admin_action_db_optimize',
+            (string) $session->get('user-id'),
+            $session->get('user-login'),
+            'success'
+        );
 
         //Show done
-        echo '[{"result":"purge_old_files","nb_files_deleted":"'.$nbFilesDeleted.'"}]';
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => $lang->get('last_execution') . ' ' .
+                    date($SETTINGS['date_format'] . ' ' . $SETTINGS['time_format'], (int) time()) .
+                    '<i class="fas fa-check text-success ml-2"></i>',
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        
+
+        /*
     * Reload the Cache table
     */
-    case "admin_action_reload_cache_table":
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
-        updateCacheTable("reload", "");
-        echo '[{"result":"cache_reload"}]';
-        break;
-
-    /*
-       * REBUILD CONFIG FILE
-    */
-    case "admin_action_rebuild_config_file":
-        $error = "";
-
-        include_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
-        $ret = handleConfigFile("rebuild");
-
-        if ($ret !== true) {
-            $error = $ret;
-        } else {
-            $error = "rebuild_config_file";
+    case 'admin_action_reload_cache_table':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
+            break;
         }
 
-        echo '[{"result":"'.$error.'"}]';
+        require_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
+        updateCacheTable('reload', NULL);
+
+        // Log
+        logEvents(
+            $SETTINGS,
+            'system',
+            'admin_action_reload_cache_table',
+            (string) $session->get('user-id'),
+            $session->get('user-login'),
+            'success'
+        );
+
+        echo prepareExchangedData(
+            [
+                'error' => false,
+                'message' => $lang->get('last_execution') . ' ' .
+                    date($SETTINGS['date_format'] . ' ' . $SETTINGS['time_format'], (int) time()) .
+                    '<i class="fas fa-check text-success mr-2"></i>',
+            ],
+            'encode'
+        );
         break;
 
-
-    /*
-    * Decrypt a backup file
-    */
-    case "admin_action_backup_decrypt":
-        // Init
-        $msg = "";
-        $result = "";
-        $filename = $post_option;
-        //get backups infos
-        $rows = DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s", "admin");
-        foreach ($rows as $record) {
-            $tp_settings[$record['intitule']] = $record['valeur'];
-        }
-
-        // check if backup file is in DB.
-        // If YES then it is encrypted with DEFUSE
-        $bck = DB::queryFirstRow("SELECT valeur FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "backup", "filename");
-
-        //read file
-        $return = "";
-        $Fnm = $tp_settings['bck_script_path'].'/'.$filename.'.sql';
-        if (file_exists($Fnm)) {
-            if (!empty($bck) && $bck['valeur'] === $filename) {
-                $err = "";
-
-                // it means that file is DEFUSE encrypted
-                include_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/Crypto.php';
-                include_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/DerivedKeys.php';
-                include_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/KeyOrPassword.php';
-                include_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/File.php';
-                include_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/Core.php';
-
-                try {
-                    \Defuse\Crypto\File::decryptFileWithPassword(
-                        $SETTINGS['bck_script_path'].'/'.$post_option.'.sql',
-                        $SETTINGS['bck_script_path'].'/'.str_replace('encrypted', 'clear', filename).'.sql',
-                        $SETTINGS['bck_script_key']
-                    );
-                } catch (Defuse\Crypto\Exception\WrongKeyOrModifiedCiphertextException $ex) {
-                    $err = "An attack! Either the wrong key was loaded, or the ciphertext has changed since it was created either corrupted in the database or intentionally modified by someone trying to carry out an attack.";
-                }
-
-                if (!empty($err)) {
-                    echo '[{ "result":"backup_decrypt_fails" , "msg":"'.$err.'"}]';
-                    break;
-                }
-            } else {
-                    // file is bCrypt encrypted
-                $inF = fopen($Fnm, "r");
-                if ($inF !== false) {
-                    while (!feof($inF)) {
-                        $return .= fgets($inF, 4096);
-                    }
-                    fclose($inF);
-                }
-
-                $return = Encryption\Crypt\aesctr::decrypt($return, $tp_settings['bck_script_key'], 256);
-
-                //save the file
-                $handle = fopen($tp_settings['bck_script_path'].'/'.$filename.'.clear'.'.sql', 'w+');
-                if ($handle !== false) {
-                    fwrite($handle, $return);
-                    fclose($handle);
-                }
-            }
-            $result = "backup_decrypt_success";
-            $msg = $tp_settings['bck_script_path'].'/'.$filename.'.clear'.'.sql';
-        } else {
-            $result = "backup_decrypt_fails";
-            $msg = "File not found: ".$Fnm;
-        }
-        echo '[{ "result":"'.$result.'" , "msg":"'.$msg.'"}]';
-        break;
 
     /*
     * Change SALT Key START
     */
-    case "admin_action_change_salt_key___start":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    case 'admin_action_change_salt_key___start':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
             break;
         }
 
-        $error = "";
-        require_once('main.functions.php');
+        $error = '';
+        require_once 'main.functions.php';
 
         // store old sk
-        $_SESSION['reencrypt_old_salt'] = file_get_contents(SECUREPATH."/teampass-seckey.txt");
-
+        $session->set('user-reencrypt_old_salt', file_get_contents(SECUREPATH.'/'.SECUREFILE));
 
         // generate new saltkey
-        $old_sk_filename = SECUREPATH."/teampass-seckey.txt".'.'.date("Y_m_d", mktime(0, 0, 0, (int) date('m'), (int) date('d'), (int) date('y'))).'.'.time();
+        $old_sk_filename = SECUREPATH.'/'.SECUREFILE . date('Y_m_d', mktime(0, 0, 0, (int) date('m'), (int) date('d'), (int) date('y'))) . '.' . time();
         copy(
-            SECUREPATH."/teampass-seckey.txt",
+            SECUREPATH.'/'.SECUREFILE,
             $old_sk_filename
         );
         $new_key = defuse_generate_key();
         file_put_contents(
-            SECUREPATH."/teampass-seckey.txt",
+            SECUREPATH.'/'.SECUREFILE,
             $new_key
         );
 
         // store new sk
-        $_SESSION['reencrypt_new_salt'] = file_get_contents(SECUREPATH."/teampass-seckey.txt");
+        $session->set('user-reencrypt_new_salt', file_get_contents(SECUREPATH.'/'.SECUREFILE));
 
         //put tool in maintenance.
         DB::update(
-            prefix_table("misc"),
+            prefixTable('misc'),
             array(
                 'valeur' => '1',
+                'updated_at' => time(),
             ),
-            "intitule = %s AND type= %s",
-            "maintenance_mode",
-            "admin"
+            'intitule = %s AND type= %s',
+            'maintenance_mode',
+            'admin'
         );
         //log
-        logEvents('system', 'change_salt_key', $_SESSION['user_id'], $_SESSION['login']);
+        logEvents($SETTINGS, 'system', 'change_salt_key', (string) $session->get('user-id'), $session->get('user-login'));
 
         // get number of items to change
-        DB::query("SELECT id FROM ".prefix_table("items")." WHERE perso = %i", 0);
+        DB::query('SELECT id FROM ' . prefixTable('items') . ' WHERE perso = %i', 0);
         $nb_of_items = DB::count();
 
         // create backup table
-        DB::query("DROP TABLE IF EXISTS ".prefix_table("sk_reencrypt_backup"));
+        DB::query('DROP TABLE IF EXISTS ' . prefixTable('sk_reencrypt_backup'));
         DB::query(
-            "CREATE TABLE `".prefix_table("sk_reencrypt_backup")."` (
+            'CREATE TABLE `' . prefixTable('sk_reencrypt_backup') . '` (
             `id` int(12) NOT null AUTO_INCREMENT,
             `current_table` varchar(100) NOT NULL,
             `current_field` varchar(500) NOT NULL,
@@ -717,153 +547,204 @@ switch ($post_type) {
             `current_sql` text NOT NULL,
             `result` text NOT NULL,
             PRIMARY KEY (`id`)
-            ) CHARSET=utf8;"
+            ) CHARSET=utf8;'
         );
 
         // store old SK in backup table
         DB::insert(
-            prefix_table("sk_reencrypt_backup"),
+            prefixTable('sk_reencrypt_backup'),
             array(
                 'current_table' => 'old_sk',
                 'current_field' => 'old_sk',
                 'value_id' => 'old_sk',
-                'value' => $_SESSION['reencrypt_old_salt'],
-                'current_sql' => "old_sk",
+                'value' => $session->get('user-reencrypt_old_salt'),
+                'current_sql' => 'old_sk',
                 'value2' => $old_sk_filename,
-                'result' => "none"
+                'result' => 'none',
             )
         );
 
         // delete previous backup files
-        $files = glob($SETTINGS['path_to_upload_folder'].'/*'); // get all file names
+        $files = glob($SETTINGS['path_to_upload_folder'] . '/*'); // get all file names
         foreach ($files as $file) { // iterate files
             if (is_file($file)) {
                 $file_parts = pathinfo($file);
-                if (strpos($file_parts['filename'], ".bck-change-sk") !== false) {
+                if (strpos($file_parts['filename'], '.bck-change-sk') !== false) {
                     unlink($file); // delete file
                 }
             }
         }
 
-        echo '[{"nextAction":"encrypt_items" , "error":"'.$error.'" , "nbOfItems":"'.$nb_of_items.'"}]';
+        // Send back
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+                'nextAction' => 'encrypt_items',
+                'nbOfItems' => $nb_of_items,
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
     * Change SALT Key - ENCRYPT
     */
-    case "admin_action_change_salt_key___encrypt":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo '[{"nextAction":"" , "error":"Key is not correct" , "nbOfItems":""}]';
+    case 'admin_action_change_salt_key___encrypt':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                    'nextAction' => '',
+                    'nbOfItems' => '',
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
             break;
         }
 
-        $error = "";
+        $error = '';
         require_once 'main.functions.php';
 
         // prepare SK
-        if (empty($_SESSION['reencrypt_new_salt']) || empty($_SESSION['reencrypt_old_salt'])) {
+        if (empty($session->get('user-reencrypt_new_salt')) === true || empty($session->get('user-reencrypt_old_salt')) === true) {
             // SK is not correct
-            echo '[{"nextAction":"" , "error":"saltkeys are empty???" , "nbOfItems":""}]';
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => 'saltkeys are empty???',
+                    'nbOfItems' => '',
+                    'nextAction' => '',
+                ),
+                'encode'
+            );
             break;
         }
+
+        // Do init
+        $nb_of_items = 0;
+        $error = $nextStart = '';
+
 
         // what objects to treat
         if (empty($post_object) === true) {
             // no more object to treat
-            $nextAction = "finishing";
+            $nextAction = 'finishing';
         } else {
             // manage list of objects
-            $objects = explode(",", $post_object);
+            $objects = explode(',', $post_object);
 
             // Allowed values for $_POST['object'] : "items,logs,files,categories"
-            if (in_array($objects[0], array("items", "logs", "files", "categories")) === false) {
-                echo '[{"nextAction":"" , "error":"Input `'.$objects[0].'` is not allowed" , "nbOfItems":""}]';
+            if (in_array($objects[0], array('items', 'logs', 'files', 'categories')) === false) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => 'Input `' . $objects[0] . '` is not allowed',
+                        'nbOfItems' => '',
+                        'nextAction' => '',
+                    ),
+                    'encode'
+                );
                 break;
             }
 
-            if ($objects[0] === "items") {
+            if ($objects[0] === 'items') {
                 //change all encrypted data in Items (passwords)
                 $rows = DB::query(
-                    "SELECT id, pw, pw_iv
-                    FROM ".prefix_table("items")."
+                    'SELECT id, pw, pw_iv
+                    FROM ' . prefixTable('items') . '
                     WHERE perso = %s
-                    LIMIT ".$post_start.", ".$post_length,
-                    "0"
+                    LIMIT ' . $post_start . ', ' . $post_length,
+                    '0'
                 );
                 foreach ($rows as $record) {
                     // backup data
                     DB::insert(
-                        prefix_table("sk_reencrypt_backup"),
+                        prefixTable('sk_reencrypt_backup'),
                         array(
                             'current_table' => 'items',
                             'current_field' => 'pw',
                             'value_id' => $record['id'],
                             'value' => $record['pw'],
-                            'current_sql' => "UPDATE ".prefix_table("items")." SET pw = '".$record['pw']."' WHERE id = '".$record['id']."';",
-                            'value2' => "none",
-                            'result' => "none"
+                            'current_sql' => 'UPDATE ' . prefixTable('items') . " SET pw = '" . $record['pw'] . "' WHERE id = '" . $record['id'] . "';",
+                            'value2' => 'none',
+                            'result' => 'none',
                         )
                     );
                     $newID = DB::insertId();
 
                     $pw = cryption(
                         $record['pw'],
-                        $_SESSION['reencrypt_old_salt'],
-                        "decrypt"
+                        $session->get('user-reencrypt_old_salt'),
+                        'decrypt',
+                        $SETTINGS
                     );
                     //encrypt with new SALT
                     $encrypt = cryption(
                         $pw['string'],
-                        $_SESSION['reencrypt_new_salt'],
-                        "encrypt"
+                        $session->get('user-reencrypt_new_salt'),
+                        'encrypt',
+                        $SETTINGS
                     );
 
                     //save in DB
                     DB::update(
-                        prefix_table("items"),
+                        prefixTable('items'),
                         array(
                             'pw' => $encrypt['string'],
-                            'pw_iv' => ""
+                            'pw_iv' => '',
                         ),
-                        "id = %i",
+                        'id = %i',
                         $record['id']
                     );
 
                     // update backup table
                     DB::update(
-                        prefix_table('sk_reencrypt_backup'),
+                        prefixTable('sk_reencrypt_backup'),
                         array(
-                            'result' => "ok"
-                            ),
-                        "id=%i",
+                            'result' => 'ok',
+                        ),
+                        'id=%i',
                         $newID
                     );
                 }
-            // ---
-            // CASE OF LOGS
-            // ---
-            } elseif ($objects[0] === "logs") {
+                // ---
+                // CASE OF LOGS
+                // ---
+            } elseif ($objects[0] === 'logs') {
                 //change all encrypted data in Logs (passwords)
                 $rows = DB::query(
-                    "SELECT raison, increment_id
-                    FROM ".prefix_table("log_items")."
+                    'SELECT raison, increment_id
+                    FROM ' . prefixTable('log_items') . "
                     WHERE action = %s AND raison LIKE 'at_pw :%'
-                    LIMIT ".$post_start.", ".$post_length,
-                    "at_modification"
+                    LIMIT " . $post_start . ', ' . $post_length,
+                    'at_modification'
                 );
                 foreach ($rows as $record) {
                     // backup data
                     DB::insert(
-                        prefix_table("sk_reencrypt_backup"),
+                        prefixTable('sk_reencrypt_backup'),
                         array(
                             'current_table' => 'log_items',
                             'current_field' => 'raison',
                             'value_id' => $record['increment_id'],
                             'value' => $record['raison'],
-                            'current_sql' => "UPDATE ".prefix_table("log_items")." SET raison = '".$record['raison']."' WHERE increment_id = '".$record['increment_id']."';",
-                            'value2' => "none",
-                            'result' => "none"
+                            'current_sql' => 'UPDATE ' . prefixTable('log_items') . " SET raison = '" . $record['raison'] . "' WHERE increment_id = '" . $record['increment_id'] . "';",
+                            'value2' => 'none',
+                            'result' => 'none',
                         )
                     );
                     $newID = DB::insertId();
@@ -873,172 +754,173 @@ switch ($post_type) {
                     if (!empty($tmp[1])) {
                         $pw = cryption(
                             $tmp[1],
-                            $_SESSION['reencrypt_old_salt'],
-                            "decrypt"
+                            $session->get('user-reencrypt_old_salt'),
+                            'decrypt',
+                            $SETTINGS
                         );
                         //encrypt with new SALT
                         $encrypt = cryption(
                             $pw['string'],
-                            $_SESSION['reencrypt_new_salt'],
-                            "encrypt"
+                            $session->get('user-reencrypt_new_salt'),
+                            'encrypt',
+                            $SETTINGS
                         );
 
                         // save in DB
                         DB::update(
-                            prefix_table("log_items"),
+                            prefixTable('log_items'),
                             array(
-                                'raison' => 'at_pw :'.$encrypt['string'],
-                                'encryption_type' => 'defuse'
+                                'raison' => 'at_pw :' . $encrypt['string'],
+                                'encryption_type' => 'defuse',
                             ),
-                            "increment_id = %i",
+                            'increment_id = %i',
                             $record['increment_id']
                         );
 
                         // update backup table
                         DB::update(
-                            prefix_table('sk_reencrypt_backup'),
+                            prefixTable('sk_reencrypt_backup'),
                             array(
-                                'result' => "ok"
-                                ),
-                            "id=%i",
+                                'result' => 'ok',
+                            ),
+                            'id=%i',
                             $newID
                         );
                     }
                 }
-            // ---
-            // CASE OF CATEGORIES
-            // ---
-            } elseif ($objects[0] === "categories") {
+                // ---
+                // CASE OF CATEGORIES
+                // ---
+            } elseif ($objects[0] === 'categories') {
                 //change all encrypted data in CATEGORIES (passwords)
                 $rows = DB::query(
-                    "SELECT id, data
-                    FROM ".prefix_table("categories_items")."
-                    LIMIT ".$post_start.", ".$post_length
+                    'SELECT id, data
+                    FROM ' . prefixTable('categories_items') . '
+                    LIMIT ' . $post_start . ', ' . $post_length
                 );
                 foreach ($rows as $record) {
                     // backup data
                     DB::insert(
-                        prefix_table("sk_reencrypt_backup"),
+                        prefixTable('sk_reencrypt_backup'),
                         array(
                             'current_table' => 'categories_items',
                             'current_field' => 'data',
                             'value_id' => $record['id'],
                             'value' => $record['data'],
-                            'current_sql' => "UPDATE ".prefix_table("categories_items")." SET data = '".$record['data']."' WHERE id = '".$record['id']."';",
-                            'value2' => "none",
-                            'result' => "none"
+                            'current_sql' => 'UPDATE ' . prefixTable('categories_items') . " SET data = '" . $record['data'] . "' WHERE id = '" . $record['id'] . "';",
+                            'value2' => 'none',
+                            'result' => 'none',
                         )
                     );
                     $newID = DB::insertId();
 
-                    //
                     $pw = cryption(
                         $record['data'],
-                        $_SESSION['reencrypt_old_salt'],
-                        "decrypt"
+                        $session->get('user-reencrypt_old_salt'),
+                        'decrypt',
+                        $SETTINGS
                     );
                     //encrypt with new SALT
                     $encrypt = cryption(
                         $pw['string'],
-                        $_SESSION['reencrypt_new_salt'],
-                        "encrypt"
+                        $session->get('user-reencrypt_new_salt'),
+                        'encrypt',
+                        $SETTINGS
                     );
                     // save in DB
                     DB::update(
-                        prefix_table("categories_items"),
+                        prefixTable('categories_items'),
                         array(
                             'data' => $encrypt['string'],
-                            'encryption_type' => 'defuse'
+                            'encryption_type' => 'defuse',
                         ),
-                        "id = %i",
+                        'id = %i',
                         $record['id']
                     );
 
                     // update backup table
                     DB::update(
-                        prefix_table('sk_reencrypt_backup'),
+                        prefixTable('sk_reencrypt_backup'),
                         array(
-                            'result' => "ok"
-                            ),
-                        "id=%i",
+                            'result' => 'ok',
+                        ),
+                        'id=%i',
                         $newID
                     );
                 }
-            // ---
-            // CASE OF FILES
-            // ---
-            } elseif ($objects[0] === "files") {
+                // ---
+                // CASE OF FILES
+                // ---
+            } elseif ($objects[0] === 'files') {
                 // Change all encrypted data in FILES (passwords)
                 $rows = DB::query(
-                    "SELECT id, file, status
-                    FROM ".prefix_table("files")."
+                    'SELECT id, file, status
+                    FROM ' . prefixTable('files') . "
                     WHERE status = 'encrypted'
-                    LIMIT ".$post_start.", ".$post_length
+                    LIMIT " . $post_start . ', ' . $post_length
                 );
                 foreach ($rows as $record) {
                     // backup data
                     DB::insert(
-                        prefix_table("sk_reencrypt_backup"),
+                        prefixTable('sk_reencrypt_backup'),
                         array(
                             'current_table' => 'files',
                             'current_field' => 'file',
                             'value_id' => $record['id'],
                             'value' => $record['file'],
-                            'current_sql' => "no_query",
-                            'value2' => "none",
-                            'result' => "none"
+                            'current_sql' => 'no_query',
+                            'value2' => 'none',
+                            'result' => 'none',
                         )
                     );
                     $newID = DB::insertId();
 
-                    if (file_exists($SETTINGS['path_to_upload_folder'].'/'.$record['file'])) {
+                    if (file_exists($SETTINGS['path_to_upload_folder'] . '/' . $record['file'])) {
                         // make a copy of file
                         if (!copy(
-                            $SETTINGS['path_to_upload_folder'].'/'.$record['file'],
-                            $SETTINGS['path_to_upload_folder'].'/'.$record['file'].".copy"
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['file'],
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['file'] . '.copy'
                         )) {
-                            $error = "Copy not possible";
+                            $error = 'Copy not possible';
                             exit;
                         } else {
                             // prepare a bck of file (that will not be deleted)
-                            $backup_filename = $record['file'].".bck-change-sk.".time();
+                            $backup_filename = $record['file'] . '.bck-change-sk.' . time();
                             copy(
-                                $SETTINGS['path_to_upload_folder'].'/'.$record['file'],
-                                $SETTINGS['path_to_upload_folder'].'/'.$backup_filename
+                                $SETTINGS['path_to_upload_folder'] . '/' . $record['file'],
+                                $SETTINGS['path_to_upload_folder'] . '/' . $backup_filename
                             );
                         }
 
-
                         // Treat the file
                         // STEP1 - Do decryption
-                            prepareFileWithDefuse(
-                                'decrypt',
-                                $SETTINGS['path_to_upload_folder'].'/'.$record['file'],
-                                $SETTINGS['path_to_upload_folder'].'/'.$record['file']."_encrypted"
-                            );
+                        prepareFileWithDefuse(
+                            'decrypt',
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['file'],
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['file'] . '_encrypted'
+                        );
 
-                            // Do cleanup of files
-                            unlink($SETTINGS['path_to_upload_folder'].'/'.$record['file']);
+                        // Do cleanup of files
+                        unlink($SETTINGS['path_to_upload_folder'] . '/' . $record['file']);
 
                         // STEP2 - Do encryption
-                            prepareFileWithDefuse(
-                                'encryp',
-                                $SETTINGS['path_to_upload_folder'].'/'.$record['file']."_encrypted",
-                                $SETTINGS['path_to_upload_folder'].'/'.$record['file']
-                            );
+                        prepareFileWithDefuse(
+                            'encryp',
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['file'] . '_encrypted',
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['file']
+                        );
 
-                            // Do cleanup of files
-                            unlink($SETTINGS['path_to_upload_folder'].'/'.$record['file']."_encrypted");
-
+                        // Do cleanup of files
+                        unlink($SETTINGS['path_to_upload_folder'] . '/' . $record['file'] . '_encrypted');
 
                         // Update backup table
                         DB::update(
-                            prefix_table('sk_reencrypt_backup'),
+                            prefixTable('sk_reencrypt_backup'),
                             array(
                                 'value2' => $backup_filename,
-                                'result' => "ok"
-                                ),
-                            "id=%i",
+                                'result' => 'ok',
+                            ),
+                            'id=%i',
                             $newID
                         );
                     }
@@ -1050,1156 +932,1431 @@ switch ($post_type) {
             // check if last item to change has been treated
             if ($nextStart >= intval($post_nbItems)) {
                 array_shift($objects);
-                $nextAction = implode(",", $objects); // remove first object of the list
+                $nextAction = implode(',', $objects); // remove first object of the list
 
                 // do some things for new object
                 if (isset($objects[0])) {
-                    if ($objects[0] === "logs") {
-                        DB::query("SELECT increment_id FROM ".prefix_table("log_items")." WHERE action = %s AND raison LIKE 'at_pw :%'", "at_modification");
-                    } elseif ($objects[0] === "files") {
-                        DB::query("SELECT id FROM ".prefix_table("files"));
-                    } elseif ($objects[0] === "categories") {
-                        DB::query("SELECT id FROM ".prefix_table("categories_items"));
-                    } elseif ($objects[0] === "custfields") {
-                        DB::query("SELECT raison FROM ".prefix_table("log_items")." WHERE action = %s AND raison LIKE 'at_pw :%'", "at_modification");
+                    if ($objects[0] === 'logs') {
+                        DB::query('SELECT increment_id FROM ' . prefixTable('log_items') . " WHERE action = %s AND raison LIKE 'at_pw :%'", 'at_modification');
+                    } elseif ($objects[0] === 'files') {
+                        DB::query('SELECT id FROM ' . prefixTable('files'));
+                    } elseif ($objects[0] === 'categories') {
+                        DB::query('SELECT id FROM ' . prefixTable('categories_items'));
+                    } elseif ($objects[0] === 'custfields') {
+                        DB::query('SELECT raison FROM ' . prefixTable('log_items') . " WHERE action = %s AND raison LIKE 'at_pw :%'", 'at_modification');
                     }
                     $nb_of_items = DB::count();
                 } else {
                     // now finishing
-                    $nextAction = "finishing";
-                    $nb_of_items = $error = $nextStart = "";
+                    $nextAction = 'finishing';
                 }
             } else {
                 $nextAction = $post_object;
-                $nb_of_items = "";
+                $nb_of_items = 0;
             }
         }
 
-        echo '[{ "nextAction":"'.$nextAction.'" , "nextStart":"'.$nextStart.'" , "error":"'.$error.'" , "nbOfItems":"'.$nb_of_items.'" , "oldsk" : "'.$_SESSION['reencrypt_old_salt'].'" , "newsk" : "'.$_SESSION['reencrypt_new_salt'].'"}]';
+        // Send back
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+                'nextAction' => $nextAction,
+                'nextStart' => (int) $nextStart,
+                'nbOfItems' => $nb_of_items,
+                'oldsk' => $session->get('user-reencrypt_old_salt'),
+                'newsk' => $session->get('user-reencrypt_new_salt'),
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
     * Change SALT Key - END
     */
-    case "admin_action_change_salt_key___end":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    case 'admin_action_change_salt_key___end':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
-
-        $error = "";
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        $error = '';
 
         // quit maintenance mode.
         DB::update(
-            prefix_table("misc"),
+            prefixTable('misc'),
             array(
                 'valeur' => '0',
+                'updated_at' => time(),
             ),
-            "intitule = %s AND type= %s",
-            "maintenance_mode",
-            "admin"
+            'intitule = %s AND type= %s',
+            'maintenance_mode',
+            'admin'
         );
 
-        echo '[{"nextAction":"done" , "error":"'.$error.'"}]';
+        // Send back
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+                'nextAction' => 'done',
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
     * Change SALT Key - Restore BACKUP data
     */
-    case "admin_action_change_salt_key___restore_backup":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    case 'admin_action_change_salt_key___restore_backup':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
             break;
         }
 
         // delete files
+        $previous_saltkey_filename = '';
         $rows = DB::query(
-            "SELECT current_table, value, value2, current_sql
-            FROM ".prefix_table("sk_reencrypt_backup")
+            'SELECT current_table, value, value2, current_sql
+            FROM ' . prefixTable('sk_reencrypt_backup')
         );
         foreach ($rows as $record) {
-            if ($record['current_table'] === "items" || $record['current_table'] === "logs" || $record['current_table'] === "categories") {
+            if ($record['current_table'] === 'items' || $record['current_table'] === 'logs' || $record['current_table'] === 'categories') {
                 // excute query
                 DB::query(
                     str_replace("\'", "'", $record['current_sql'])
                 );
-            } elseif ($record['current_table'] === "files") {
+            } elseif ($record['current_table'] === 'files') {
                 // restore backup file
-                if (file_exists($SETTINGS['path_to_upload_folder'].'/'.$record['value'])) {
-                    unlink($SETTINGS['path_to_upload_folder'].'/'.$record['value']);
-                    if (file_exists($SETTINGS['path_to_upload_folder'].'/'.$record['value2'])) {
+                if (file_exists($SETTINGS['path_to_upload_folder'] . '/' . $record['value'])) {
+                    unlink($SETTINGS['path_to_upload_folder'] . '/' . $record['value']);
+                    if (file_exists($SETTINGS['path_to_upload_folder'] . '/' . $record['value2'])) {
                         rename(
-                            $SETTINGS['path_to_upload_folder'].'/'.$record['value2'],
-                            $SETTINGS['path_to_upload_folder'].'/'.$record['value']
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['value2'],
+                            $SETTINGS['path_to_upload_folder'] . '/' . $record['value']
                         );
                     }
                 }
-            } elseif ($record['current_table'] === "old_sk") {
+            } elseif ($record['current_table'] === 'old_sk') {
                 $previous_saltkey_filename = $record['value2'];
             }
         }
 
         // restore saltkey file
         if (file_exists($previous_saltkey_filename)) {
-            unlink(SECUREPATH."/teampass-seckey.txt");
+            unlink(SECUREPATH.'/'.SECUREFILE);
             rename(
                 $previous_saltkey_filename,
-                SECUREPATH.'/teampass-seckey.txt'
+                SECUREPATH.'/'.SECUREFILE
             );
         }
 
         // drop table
-        DB::query("DROP TABLE IF EXISTS ".prefix_table("sk_reencrypt_backup"));
+        DB::query('DROP TABLE IF EXISTS ' . prefixTable('sk_reencrypt_backup'));
 
-        echo '[{"status":"done"}]';
+        // Send back
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+            ),
+            'encode'
+        );
+
         break;
 
-    /*
+        /*
     * Change SALT Key - Delete BACKUP data
     */
-    case "admin_action_change_salt_key___delete_backup":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    case 'admin_action_change_salt_key___delete_backup':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
             break;
         }
 
         // delete files
         $rows = DB::query(
-            "SELECT value, value2
-            FROM ".prefix_table("sk_reencrypt_backup")."
+            'SELECT value, value2
+            FROM ' . prefixTable('sk_reencrypt_backup') . "
             WHERE current_table = 'files'"
         );
         foreach ($rows as $record) {
-            if (file_exists($SETTINGS['path_to_upload_folder'].'/'.$record['value2'])) {
-                unlink($SETTINGS['path_to_upload_folder'].'/'.$record['value2']);
+            if (file_exists($SETTINGS['path_to_upload_folder'] . '/' . $record['value2'])) {
+                unlink($SETTINGS['path_to_upload_folder'] . '/' . $record['value2']);
             }
         }
 
         // drop table
-        DB::query("DROP TABLE IF EXISTS ".prefix_table("sk_reencrypt_backup"));
+        DB::query('DROP TABLE IF EXISTS ' . prefixTable('sk_reencrypt_backup'));
 
         echo '[{"status":"done"}]';
         break;
 
-    /*
+        /*
     * Test the email configuraiton
     */
-    case "admin_email_test_configuration":
-        if (empty($_SESSION['user_email'])) {
-            echo '[{"result":"email_test_conf", "error":"error_mail_not_send" , "message":"User has no email defined!"}]';
+    case 'admin_email_test_configuration':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+
+        // User has an email set?
+        if (empty($session->get('user-email')) === true) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('no_email_set'),
+                ),
+                'encode'
+            );
         } else {
-            require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
+            require_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
 
             //send email
-            $ret = json_decode(
-                sendEmail(
-                    $LANG['admin_email_test_subject'],
-                    $LANG['admin_email_test_body'],
-                    $_SESSION['user_email'],
-                    $LANG,
-                    $SETTINGS
-                ),
-                true
+            $emailSettings = new EmailSettings($SETTINGS);
+            $emailService = new EmailService();
+            $emailService->sendMail(
+                $lang->get('admin_email_test_subject'),
+                $lang->get('admin_email_test_body'),
+                $session->get('user-email'),
+                $emailSettings
             );
-            echo '[{"result":"email_test_conf", "error":"'.$ret['error'].'"}]';
+            
+            echo prepareExchangedData(
+                array(
+                    'error' => false,
+                    'message' => '',
+                ),
+                'encode'
+            );
         }
         break;
 
-    /*
+        /*
     * Send emails in backlog
     */
-    case "admin_email_send_backlog":
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
+    case 'admin_email_send_backlog':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
 
-        $rows = DB::query("SELECT * FROM ".prefix_table("emails")." WHERE status = %s OR status = %s", "not_sent", "");
-        foreach ($rows as $record) {
-            //send email
-            $ret = json_decode(
-                sendEmail(
+        include_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
+        $emailSettings = new EmailSettings($SETTINGS);
+        $emailService = new EmailService();
+
+        $rows = DB::query(
+            'SELECT *
+            FROM ' . prefixTable('emails') . '
+            WHERE status = %s OR status = %s',
+            'not_sent',
+            ''
+        );
+        $counter = DB::count();
+        $error = false;
+        $message = '';
+
+        if ($counter > 0) {
+            // Only treat first email
+            foreach ($rows as $record) {
+                //send email
+                $email = $emailService->sendMail(
                     $record['subject'],
                     $record['body'],
                     $record['receivers'],
-                    $LANG,
-                    $SETTINGS
+                    $emailSettings
+                );
+                $ret = json_decode(
+                    $email,
+                    true
+                );
+
+                if (empty($ret['error']) === false) {
+                    //update item_id in files table
+                    DB::update(
+                        prefixTable('emails'),
+                        array(
+                            'status' => 'not_sent',
+                        ),
+                        'timestamp = %s',
+                        $record['timestamp']
+                    );
+
+                    $error = true;
+                    $message = $ret['message'];
+                } else {
+                    //delete from DB
+                    DB::delete(
+                        prefixTable('emails'),
+                        'timestamp = %s',
+                        $record['timestamp']
+                    );
+
+                    //update LOG
+                    logEvents(
+                        $SETTINGS,
+                        'admin_action',
+                        'Emails backlog',
+                        (string) $session->get('user-id'),
+                        $session->get('user-login')
+                    );
+                }
+
+                // Exit loop
+                break;
+            }
+        }
+
+        echo prepareExchangedData(
+            array(
+                'error' => $error,
+                'message' => $message,
+                'counter' => $counter,
+            ),
+            'encode'
+        );
+        break;
+
+        /*
+    * Send emails in backlog
+    */
+    case 'admin_email_send_backlog_old':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
                 ),
+                'encode'
+            );
+            break;
+        }
+
+        include_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
+
+        // Instatiate email settings and service
+        $emailSettings = new EmailSettings($SETTINGS);
+        $emailService = new EmailService();
+
+        $rows = DB::query('SELECT * FROM ' . prefixTable('emails') . ' WHERE status = %s OR status = %s', 'not_sent', '');
+        foreach ($rows as $record) {
+            //send email
+            $email = $emailService->sendMail(
+                $record['subject'],
+                $record['body'],
+                $record['receivers'],
+                $emailSettings
+            );
+            $ret = json_decode(
+                $email,
                 true
             );
 
             if (empty($ret['error']) === false) {
                 //update item_id in files table
                 DB::update(
-                    prefix_table("emails"),
+                    prefixTable('emails'),
                     array(
-                        'status' => "not_sent"
+                        'status' => 'not_sent',
                     ),
-                    "timestamp = %s",
+                    'timestamp = %s',
                     $record['timestamp']
                 );
             } else {
                 //delete from DB
-                DB::delete(prefix_table("emails"), "timestamp = %s", $record['timestamp']);
+                DB::delete(prefixTable('emails'), 'timestamp = %s', $record['timestamp']);
             }
         }
 
         //update LOG
-        logEvents('admin_action', 'Emails backlog', $_SESSION['user_id'], $_SESSION['login']);
+        logEvents($SETTINGS, 'admin_action', 'Emails backlog', (string) $session->get('user-id'), $session->get('user-login'));
 
-        echo '[{"result":"admin_email_send_backlog", "error : ""}]';
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
     * Attachments encryption
     */
-    case "admin_action_attachments_cryption":
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
+    case 'admin_action_attachments_cryption':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
+            break;
+        }
+
+        require_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
 
         // init
-        $error = "";
-        $ret = "";
-        $cpt = 0;
-        $filesList = "";
-        $continu = true;
+        $filesList = array();
 
         // get through files
         if (null !== $post_option && empty($post_option) === false) {
             // Loop on files
             $rows = DB::query(
-                "SELECT id, file, status
-                FROM ".prefix_table("files")
+                'SELECT id, file, status
+                FROM ' . prefixTable('files')
             );
             foreach ($rows as $record) {
-                if (is_file($SETTINGS['path_to_upload_folder'].'/'.$record['file'])) {
-                    $addFile = 0;
-                    if ($post_option == "decrypt" && $record['status'] === 'encrypted') {
-                        $addFile = 1;
-                    } elseif ($post_option == "encrypt" && $record['status'] === 'clear') {
-                        $addFile = 1;
+                if (is_file($SETTINGS['path_to_upload_folder'] . '/' . $record['file'])) {
+                    $addFile = false;
+                    if (($post_option === 'attachments-decrypt' && $record['status'] === 'encrypted')
+                        || ($post_option === 'attachments-encrypt' && $record['status'] === 'clear')
+                    ) {
+                        $addFile = true;
                     }
 
-                    if ($addFile === 1) {
-                        if (empty($filesList) === true) {
-                            $filesList = $record['id'];
-                        } else {
-                            $filesList .= ";".$record['id'];
-                        }
+                    if ($addFile === true) {
+                        array_push($filesList, $record['id']);
                     }
                 }
             }
         } else {
-            $error = "No option";
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
         }
 
-        echo '[{"result":"attachments_cryption", "error":"'.$error.'", "continu":"'.$continu.'", "list":"'.$filesList.'", "cpt":"0"}]';
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+                'list' => $filesList,
+                'counter' => 0,
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
      * Attachments encryption - Treatment in several loops
      */
-    case "admin_action_attachments_cryption_continu":
-        include $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-        require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
+    case 'admin_action_attachments_cryption_continu':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
+            break;
+        }
+
+        // Prepare variables
+        $post_list = filter_var_array($post_list, FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+        $post_counter = filter_var($post_counter, FILTER_SANITIZE_NUMBER_INT);
+
+        include $SETTINGS['cpassman_dir'] . '/includes/config/settings.php';
+        include_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
 
         $cpt = 0;
-        $newFilesList = "";
         $continu = true;
-        $error = "";
-
-        // load PhpEncryption library
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Crypto.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Encoding.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'DerivedKeys.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Key.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'KeyOrPassword.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'File.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'RuntimeTests.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'KeyProtectedByPassword.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Core.php';
-
-        // Get KEY
-        $ascii_key = file_get_contents(SECUREPATH."/teampass-seckey.txt");
+        $newFilesList = array();
+        $message = '';
 
         // treat 10 files
-        $filesList = explode(';', $post_list);
-        foreach ($filesList as $file) {
+        foreach ($post_list as $file) {
             if ($cpt < 5) {
                 // Get file name
-                $file_info = DB::queryfirstrow(
-                    "SELECT file
-                    FROM ".prefix_table("files")."
-                    WHERE id = %i",
+                $file_info = DB::queryFirstRow(
+                    'SELECT file
+                    FROM ' . prefixTable('files') . '
+                    WHERE id = %i',
                     $file
                 );
 
                 // skip file is Coherancey not respected
-                if (is_file($SETTINGS['path_to_upload_folder'].'/'.$file_info['file'])) {
+                if (is_file($SETTINGS['path_to_upload_folder'] . '/' . $file_info['file'])) {
                     // Case where we want to decrypt
-                    if ($post_option === "decrypt") {
+                    if ($post_option === 'decrypt') {
                         prepareFileWithDefuse(
                             'decrypt',
-                            $SETTINGS['path_to_upload_folder'].'/'.$file_info['file'],
-                            $SETTINGS['path_to_upload_folder'].'/defuse_temp_'.$file_info['file']
+                            $SETTINGS['path_to_upload_folder'] . '/' . $file_info['file'],
+                            $SETTINGS['path_to_upload_folder'] . '/defuse_temp_' . $file_info['file'],
                         );
-                    // Case where we want to encrypt
-                    } elseif ($post_option === "encrypt") {
+                        // Case where we want to encrypt
+                    } elseif ($post_option === 'encrypt') {
                         prepareFileWithDefuse(
                             'encrypt',
-                            $SETTINGS['path_to_upload_folder'].'/'.$file_info['file'],
-                            $SETTINGS['path_to_upload_folder'].'/defuse_temp_'.$file_info['file']
+                            $SETTINGS['path_to_upload_folder'] . '/' . $file_info['file'],
+                            $SETTINGS['path_to_upload_folder'] . '/defuse_temp_' . $file_info['file'],
                         );
                     }
                     // Do file cleanup
-                    fileDelete($SETTINGS['path_to_upload_folder'].'/'.$file_info['file']);
+                    fileDelete($SETTINGS['path_to_upload_folder'] . '/' . $file_info['file'], $SETTINGS);
                     rename(
-                        $SETTINGS['path_to_upload_folder'].'/defuse_temp_'.$file_info['file'],
-                        $SETTINGS['path_to_upload_folder'].'/'.$file_info['file']
+                        $SETTINGS['path_to_upload_folder'] . '/defuse_temp_' . $file_info['file'],
+                        $SETTINGS['path_to_upload_folder'] . '/' . $file_info['file']
                     );
 
                     // store in DB
-                        DB::update(
-                            prefix_table('files'),
-                            array(
-                                'status' => $post_option === "decrypt" ? "clear" : "encrypted"
-                                ),
-                            "id = %i",
-                            $file
-                        );
+                    DB::update(
+                        prefixTable('files'),
+                        array(
+                            'status' => $post_option === 'attachments-decrypt' ? 'clear' : 'encrypted',
+                        ),
+                        'id = %i',
+                        $file
+                    );
 
-                        $cpt++;
+                    ++$cpt;
                 }
             } else {
                 // build list
-                if (empty($newFilesList)) {
-                    $newFilesList = $file;
-                } else {
-                    $newFilesList .= ";".$file;
-                }
+                array_push($newFilesList, $file);
             }
         }
 
-        if (empty($newFilesList)) {
+        // Should we stop
+        if (count($newFilesList) === 0) {
             $continu = false;
+
+            //update LOG
+            logEvents(
+                $SETTINGS,
+                'admin_action',
+                'attachments_encryption_changed',
+                (string) $session->get('user-id'),
+                $session->get('user-login'),
+                $post_option === 'attachments-decrypt' ? 'clear' : 'encrypted'
+            );
+
+            $message = $lang->get('last_execution') . ' ' .
+                date($SETTINGS['date_format'] . ' ' . $SETTINGS['time_format'], (int) time()) .
+                '<i class="fas fa-check text-success ml-2 mr-3"></i>';
         }
 
-        echo '[{"error":"'.$error.'", "continu":"'.$continu.'", "list":"'.$newFilesList.'", "cpt":"'.($post_cpt + $cpt).'"}]';
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => $message,
+                'list' => $newFilesList,
+                'counter' => $post_cpt + $cpt,
+                'continu' => $continu,
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
      * API save key
      */
-    case "admin_action_api_save_key":
-        // Check KEY and rights
-        if ($post_session_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    case 'admin_action_api_save_key':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
             break;
         }
 
-        // Init
-        $error = "";
+        // decrypt and retrieve data in JSON format
+        $dataReceived = prepareExchangedData(
+            $post_data,
+            'decode'
+        );
+
+        $post_label = isset($dataReceived['label']) === true ? filter_var($dataReceived['label'], FILTER_SANITIZE_FULL_SPECIAL_CHARS) : '';
+        $post_action = filter_var($dataReceived['action'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+        $timestamp = time();
 
         // add new key
-        if (null !== $post_action && $post_action === "add") {
+        if (null !== $post_action && $post_action === 'add') {
+            // Generate KEY
+            require_once 'main.functions.php';
+            $key = GenerateCryptKey(39, false, true, true, false, true);
+
+            // Generate objectKey
+            //$object = doDataEncryption($key, SECUREFILE.':'.$timestamp);
+            
+            // Save in DB
             DB::insert(
-                prefix_table("api"),
+                prefixTable('api'),
                 array(
-                    'id'        => null,
-                    'type'      => 'key',
-                    'label'     => $post_label,
-                    'value'       => $post_key,
-                    'timestamp' => time()
+                    'increment_id' => null,
+                    'type' => 'key',
+                    'label' => $post_label,
+                    'value' => $key, //$object['encrypted'],
+                    'timestamp' => $timestamp,
+                    //'user_id' => -1,
                 )
             );
-        // Update existing key
-        } elseif (null !== $post_action && $post_action === "update") {
+
+            $post_id = DB::insertId();
+            // Update existing key
+        } elseif (null !== $post_action && $post_action === 'update') {
+            $post_id = filter_var($dataReceived['id'], FILTER_SANITIZE_NUMBER_INT);
+
             DB::update(
-                prefix_table("api"),
+                prefixTable('api'),
                 array(
-                    'label'     => $post_label,
-                    'timestamp' => time()
+                    'label' => $post_label,
+                    'timestamp' => $timestamp,
                 ),
-                "id=%i",
+                'increment_id=%i',
                 $post_id
             );
-        // Delete existing key
-        } elseif (null !== $post_action && $post_action === "delete") {
+            // Delete existing key
+        } elseif (null !== $post_action && $post_action === 'delete') {
+            $post_id = filter_var($dataReceived['id'], FILTER_SANITIZE_NUMBER_INT);
+
             DB::query(
-                "DELETE FROM ".prefix_table("api")." WHERE id = %i",
+                'DELETE FROM ' . prefixTable('api') . ' WHERE increment_id = %i',
                 $post_id
             );
         }
-        echo '[{"error":"'.$error.'"}]';
+
+        // send data
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+                'keyId' => $post_id,
+                'key' => isset($key) === true ? $key : '',
+            ),
+            'encode'
+        );
         break;
 
-    /*
+        /*
        * API save key
     */
-    case "admin_action_api_save_ip":
-        // Check KEY and rights
-        if ($post_session_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    case 'admin_action_api_save_ip':
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        // Is admin?
+        if ($session->get('user-admin') === 1) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('error_not_allowed_to'),
+                ),
+                'encode'
+            );
             break;
         }
 
-        // Init
-        $error = "";
+        // decrypt and retrieve data in JSON format
+        $dataReceived = prepareExchangedData(
+            $post_data,
+            'decode'
+        );
+
+        $post_action = filter_var($dataReceived['action'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 
         // add new key
-        if (null !== $post_action && $post_action === "add") {
+        if (null !== $post_action && $post_action === 'add') {
+            $post_label = filter_var($dataReceived['label'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $post_ip = filter_var($dataReceived['ip'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+
+            // Store in DB
             DB::insert(
-                prefix_table("api"),
+                prefixTable('api'),
                 array(
-                    'id'        => null,
-                    'type'      => 'ip',
-                    'label'     => $post_label,
-                    'value'       => $post_key,
-                    'timestamp' => time()
+                    'increment_id' => null,
+                    'type' => 'ip',
+                    'label' => $post_label,
+                    'value' => $post_ip,
+                    'timestamp' => time(),
                 )
             );
-        // Update existing key
-        } elseif (null !== $post_action && $post_action === "update") {
-                DB::update(
-                    prefix_table("api"),
-                    array(
-                        'label'     => $post_label,
-                        'value'     => $post_key,
-                        'timestamp' => time()
-                    ),
-                    "id=%i",
-                    $post_id
+
+            $post_id = DB::insertId();
+            // Update existing key
+        } elseif (null !== $post_action && $post_action === 'update') {
+            $post_id = filter_var($dataReceived['id'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $post_field = filter_var($dataReceived['field'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $post_value = filter_var($dataReceived['value'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            if ($post_field === 'value') {
+                $arr = array(
+                    'value' => $post_value,
+                    'timestamp' => time(),
                 );
-        // Delete existing key
-        } elseif (null !== $post_action && $post_action === "delete") {
-            DB::query("DELETE FROM ".prefix_table("api")." WHERE id=%i", $post_id);
+            } else {
+                $arr = array(
+                    'label' => $post_value,
+                    'timestamp' => time(),
+                );
+            }
+            DB::update(
+                prefixTable('api'),
+                $arr,
+                'increment_id=%i',
+                $post_id
+            );
+            // Delete existing key
+        } elseif (null !== $post_action && $post_action === 'delete') {
+            $post_id = filter_var($dataReceived['id'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            DB::query('DELETE FROM ' . prefixTable('api') . ' WHERE increment_id=%i', $post_id);
         }
-        echo '[{"error":"'.$error.'"}]';
+
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+                'ipId' => $post_id,
+            ),
+            'encode'
+        );
         break;
 
-    case "save_api_status":
+    case 'save_api_status':
         // Do query
-        DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "api");
+        DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'api');
         $counter = DB::count();
-        if ($counter == 0) {
+        if ($counter === 0) {
             DB::insert(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'type' => "admin",
-                    "intitule" => "api",
-                    'valeur' => $post_status
-                    )
+                    'type' => 'admin',
+                    'intitule' => 'api',
+                    'valeur' => $post_status,
+                    'created_at' => time(),
+                )
             );
         } else {
             DB::update(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'valeur' => $post_status
-                    ),
-                "type = %s AND intitule = %s",
-                "admin",
-                "api"
+                    'valeur' => $post_status,
+                    'updated_at' => time(),
+                ),
+                'type = %s AND intitule = %s',
+                'admin',
+                'api'
             );
         }
         $SETTINGS['api'] = $post_status;
         break;
 
-    case "save_duo_status":
-        DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "duo");
-        $counter = DB::count();
-        if ($counter == 0) {
-            DB::insert(
-                prefix_table("misc"),
+    case 'run_duo_config_check':
+        //Libraries call
+        require_once $SETTINGS['cpassman_dir'] . '/sources/main.functions.php';
+        // Check KEY
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
                 array(
-                    'type' => "admin",
-                    "intitule" => "duo",
-                    'valeur' => $post_status
-                    )
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
             );
-        } else {
-            DB::update(
-                prefix_table("misc"),
-                array(
-                    'valeur' => $post_status
-                    ),
-                "type = %s AND intitule = %s",
-                "admin",
-                "duo"
-            );
-        }$post_status;
-        break;
-
-    case "save_duo_in_sk_file":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
             break;
         }
+
         // decrypt and retreive data in JSON format
         $dataReceived = prepareExchangedData(
             $post_data,
-            "decode"
+            'decode'
         );
 
-        // Prepare variables
-        $akey = htmlspecialchars_decode($dataReceived['akey']);
-        $ikey = htmlspecialchars_decode($dataReceived['ikey']);
-        $skey = htmlspecialchars_decode($dataReceived['skey']);
-        $host = htmlspecialchars_decode($dataReceived['host']);
-
-        //get infos from SETTINGS.PHP file
-        $filename = $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-        $tmp_skfile = '';
-        if (file_exists($filename)) {
-            // get sk.php file path
-            $settingsFile = file($filename);
-            foreach ($settingsFile as $key => $val) {
-                if (substr_count($val, "@define('SECUREPATH'")) {
-                    $tmp_skfile = substr($val, 23, strpos($val, "');") - 23).'/sk.php';
-                }
-            }
-
-            // before perform a copy of sk.php file
-            if (file_exists($tmp_skfile)) {
-                //Do a copy of the existing file
-                if (!copy(
-                    $tmp_skfile,
-                    $tmp_skfile.'.'.date(
-                        "Y_m_d",
-                        mktime(0, 0, 0, (int) date('m'), (int) date('d'), (int) date('y'))
-                    )
-                )) {
-                    echo '[{"result" : "" , "error" : "Could NOT perform a copy of file: '.$tmp_skfile.'"}]';
-                    break;
-                } else {
-                    fileDelete($tmp_skfile);
-                }
-            } else {
-                // send back an error
-                echo '[{"result" : "" , "error" : "Could NOT access file: '.$tmp_skfile.'"}]';
-                break;
-            }
-        }
-
-        // Write back values in sk.php file
-        $fh = fopen($tmp_skfile, 'w');
-        if ($fh !== false) {
-            $result2 = fwrite(
-                $fh,
-                utf8_encode(
-                    "<?php
-    @define('COST', '13'); // Don't change this.
-    // DUOSecurity credentials
-    @define('AKEY', '".(string) strip_tags(htmlentities(addslashes($akey)))."');
-    @define('IKEY', '".(string) strip_tags(htmlentities(addslashes($ikey)))."');
-    @define('SKEY', '".(string) strip_tags(htmlentities(addslashes($skey)))."');
-    @define('HOST', '".(string) strip_tags(htmlentities(addslashes($host)))."');
-    ?>"
-                )
+        // Check if we have what we need first
+        if (empty($dataReceived['duo_ikey']) || empty($dataReceived['duo_skey']) || empty($dataReceived['duo_host'])) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('data_are_missing'),
+                ),
+                'encode'
             );
-            fclose($fh);
+            break;
         }
 
+        // Run Duo Config Check
+        try {
+            $duo_client = new Client(
+                $dataReceived['duo_ikey'],
+                $dataReceived['duo_skey'],
+                $dataReceived['duo_host'],
+                $SETTINGS['cpassman_url'].'/'.DUO_CALLBACK
+            );
+        } catch (DuoException $e) {
+            if (defined('LOG_TO_SERVER') && LOG_TO_SERVER === true) {
+                error_log('TEAMPASS Error - duo config - '.$e->getMessage());
+            }
+            // deepcode ignore ServerLeak: Data is encrypted before being sent
+            echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('duo_config_error'),
+                    ),
+                    'encode'
+            );
+            break;
+        }
+
+        // Run healthcheck against Duo with the config
+        try {
+            $duo_client->healthCheck();
+        } catch (DuoException $e) {
+            if (defined('LOG_TO_SERVER') && LOG_TO_SERVER === true) {
+                error_log('TEAMPASS Error - duo config - '.$e->getMessage());
+            }
+            // deepcode ignore ServerLeak: Data is encrypted before being sent
+            echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('duo_error_check_config'),
+                    ),
+                    'encode'
+            );
+            break;
+        }
 
         // send data
-        echo '[{"result" : "'.addslashes($LANG['admin_duo_stored']).'" , "error" : ""}]';
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+            ),
+            'encode'
+        );
         break;
 
-    case "save_google_options":
+    case 'save_google_options':
         // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
         // decrypt and retreive data in JSON format
         $dataReceived = prepareExchangedData(
             $post_data,
-            "decode"
+            'decode'
         );
 
         // Google Authentication
-        if (htmlspecialchars_decode($dataReceived['google_authentication']) == "false") {
+        if (htmlspecialchars_decode($dataReceived['google_authentication']) === 'false') {
             $tmp = 0;
         } else {
             $tmp = 1;
         }
-        DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "google_authentication");
+        DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'google_authentication');
         $counter = DB::count();
-        if ($counter == 0) {
+        if ($counter === 0) {
             DB::insert(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'type' => "admin",
-                    "intitule" => "google_authentication",
-                    'valeur' => $tmp
+                    'type' => 'admin',
+                    'intitule' => 'google_authentication',
+                    'valeur' => $tmp,
+                    'created_at' => time(),
                 )
             );
         } else {
             DB::update(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'valeur' => $tmp
+                    'valeur' => $tmp,
+                    'updated_at' => time(),
                 ),
-                "type = %s AND intitule = %s",
-                "admin",
-                "google_authentication"
+                'type = %s AND intitule = %s',
+                'admin',
+                'google_authentication'
             );
         }
         $SETTINGS['google_authentication'] = htmlspecialchars_decode($dataReceived['google_authentication']);
 
         // ga_website_name
         if (is_null($dataReceived['ga_website_name']) === false) {
-            DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "ga_website_name");
+            DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'ga_website_name');
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'type' => "admin",
-                        "intitule" => "ga_website_name",
-                        'valeur' => htmlspecialchars_decode($dataReceived['ga_website_name'])
+                        'type' => 'admin',
+                        'intitule' => 'ga_website_name',
+                        'valeur' => htmlspecialchars_decode($dataReceived['ga_website_name']),
+                        'created_at' => time(),
                     )
                 );
             } else {
                 DB::update(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'valeur' => htmlspecialchars_decode($dataReceived['ga_website_name'])
+                        'valeur' => htmlspecialchars_decode($dataReceived['ga_website_name']),
+                        'updated_at' => time(),
                     ),
-                    "type = %s AND intitule = %s",
-                    "admin",
-                    "ga_website_name"
+                    'type = %s AND intitule = %s',
+                    'admin',
+                    'ga_website_name'
                 );
             }
             $SETTINGS['ga_website_name'] = htmlspecialchars_decode($dataReceived['ga_website_name']);
-
-
-            // save change in config file
-            handleConfigFile("update", 'ga_website_name', $SETTINGS['ga_website_name']);
         } else {
-            $SETTINGS['ga_website_name'] = "";
+            $SETTINGS['ga_website_name'] = '';
         }
 
         // send data
-        echo '[{"result" : "'.addslashes($LANG['done']).'" , "error" : ""}]';
+        echo '[{"result" : "' . addslashes($lang['done']) . '" , "error" : ""}]';
         break;
 
-    case "save_agses_options":
+    case 'save_agses_options':
         // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
         // decrypt and retreive data in JSON format
         $dataReceived = prepareExchangedData(
             $post_data,
-            "decode"
+            'decode'
         );
 
         // agses_hosted_url
         if (!is_null($dataReceived['agses_hosted_url'])) {
-            DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "agses_hosted_url");
+            DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'agses_hosted_url');
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'type' => "admin",
-                        "intitule" => "agses_hosted_url",
-                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_url'])
+                        'type' => 'admin',
+                        'intitule' => 'agses_hosted_url',
+                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_url']),
+                        'created_at' => time(),
                     )
                 );
             } else {
                 DB::update(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_url'])
+                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_url']),
+                        'updated_at' => time(),
                     ),
-                    "type = %s AND intitule = %s",
-                    "admin",
-                    "agses_hosted_url"
+                    'type = %s AND intitule = %s',
+                    'admin',
+                    'agses_hosted_url'
                 );
             }
             $SETTINGS['agses_hosted_url'] = htmlspecialchars_decode($dataReceived['agses_hosted_url']);
         } else {
-            $SETTINGS['agses_hosted_url'] = "";
+            $SETTINGS['agses_hosted_url'] = '';
         }
 
         // agses_hosted_id
         if (!is_null($dataReceived['agses_hosted_id'])) {
-            DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "agses_hosted_id");
+            DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'agses_hosted_id');
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'type' => "admin",
-                        "intitule" => "agses_hosted_id",
-                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_id'])
+                        'type' => 'admin',
+                        'intitule' => 'agses_hosted_id',
+                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_id']),
+                        'created_at' => time(),
                     )
                 );
             } else {
                 DB::update(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_id'])
+                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_id']),
+                        'updated_at' => time(),
                     ),
-                    "type = %s AND intitule = %s",
-                    "admin",
-                    "agses_hosted_id"
+                    'type = %s AND intitule = %s',
+                    'admin',
+                    'agses_hosted_id'
                 );
             }
             $SETTINGS['agses_hosted_id'] = htmlspecialchars_decode($dataReceived['agses_hosted_id']);
         } else {
-            $SETTINGS['agses_hosted_id'] = "";
+            $SETTINGS['agses_hosted_id'] = '';
         }
 
         // agses_hosted_apikey
         if (!is_null($dataReceived['agses_hosted_apikey'])) {
-            DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "agses_hosted_apikey");
+            DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'agses_hosted_apikey');
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'type' => "admin",
-                        "intitule" => "agses_hosted_apikey",
-                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_apikey'])
+                        'type' => 'admin',
+                        'intitule' => 'agses_hosted_apikey',
+                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_apikey']),
+                        'created_at' => time(),
                     )
                 );
             } else {
                 DB::update(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_apikey'])
+                        'valeur' => htmlspecialchars_decode($dataReceived['agses_hosted_apikey']),
+                        'updated_at' => time(),
                     ),
-                    "type = %s AND intitule = %s",
-                    "admin",
-                    "agses_hosted_apikey"
+                    'type = %s AND intitule = %s',
+                    'admin',
+                    'agses_hosted_apikey'
                 );
             }
             $SETTINGS['agses_hosted_apikey'] = htmlspecialchars_decode($dataReceived['agses_hosted_apikey']);
         } else {
-            $SETTINGS['agses_hosted_apikey'] = "";
+            $SETTINGS['agses_hosted_apikey'] = '';
         }
 
         // send data
-        echo '[{"result" : "'.addslashes($LANG['done']).'" , "error" : ""}]';
+        echo '[{"result" : "' . addslashes($lang['done']) . '" , "error" : ""}]';
         break;
 
-    case "save_option_change":
+    case 'save_option_change':
         // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
         // decrypt and retreive data in JSON format
         $dataReceived = prepareExchangedData(
             $post_data,
-            "decode"
+            'decode'
         );
-        $type = "admin";
+
+        // prepare data
+        $post_value = filter_var($dataReceived['value'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+        $post_field = filter_var($dataReceived['field'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+        $post_translate = isset($dataReceived['translate']) === true ? filter_var($dataReceived['translate'], FILTER_SANITIZE_FULL_SPECIAL_CHARS) : '';
         
         require_once 'main.functions.php';
 
         // In case of key, then encrypt it
-        if ($dataReceived['field'] === 'bck_script_passkey') {
-            $dataReceived['value'] = cryption(
-                $dataReceived['value'],
-                "",
-                "encrypt"
+        if ($post_field === 'bck_script_passkey') {
+            $post_value = cryption(
+                $post_value,
+                '',
+                'encrypt',
+                $SETTINGS
             )['string'];
         }
 
         // Check if setting is already in DB. If NO then insert, if YES then update.
         $data = DB::query(
-            "SELECT * FROM ".prefix_table("misc")."
-            WHERE type = %s AND intitule = %s",
-            $type,
-            $dataReceived['field']
+            'SELECT * FROM ' . prefixTable('misc') . '
+            WHERE type = %s AND intitule = %s',
+            'admin',
+            $post_field
         );
         $counter = DB::count();
         if ($counter === 0) {
             DB::insert(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'valeur' => $dataReceived['value'],
-                    'type' => $type,
-                    'intitule' => $dataReceived['field']
-                    )
+                    'valeur' => $post_value,
+                    'type' => 'admin',
+                    'intitule' => $post_field,
+                    'created_at' => time(),
+                )
             );
             // in case of stats enabled, add the actual time
-            if ($dataReceived['field'] === 'send_stats') {
+            if ($post_field === 'send_stats') {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
                         'valeur' => time(),
-                        'type' => $type,
-                        'intitule' => $dataReceived['field'].'_time'
-                        )
+                        'type' => 'admin',
+                        'intitule' => $post_field . '_time',
+                        'updated_at' => time(),
+                    )
                 );
             }
         } else {
+            // Update DB settings
             DB::update(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'valeur' => $dataReceived['value']
-                    ),
-                "type = %s AND intitule = %s",
-                $type,
-                $dataReceived['field']
+                    'valeur' => $post_value,
+                    'updated_at' => time(),
+                ),
+                'type = %s AND intitule = %s',
+                'admin',
+                $post_field
             );
+
             // in case of stats enabled, update the actual time
-            if ($dataReceived['field'] === 'send_stats') {
+            if ($post_field === 'send_stats') {
                 // Check if previous time exists, if not them insert this value in DB
-                $data_time = DB::query(
-                    "SELECT * FROM ".prefix_table("misc")."
-                    WHERE type = %s AND intitule = %s",
-                    $type,
-                    $dataReceived['field'].'_time'
+                DB::query(
+                    'SELECT * FROM ' . prefixTable('misc') . '
+                    WHERE type = %s AND intitule = %s',
+                    'admin',
+                    $post_field . '_time'
                 );
                 $counter = DB::count();
                 if ($counter === 0) {
                     DB::insert(
-                        prefix_table("misc"),
+                        prefixTable('misc'),
                         array(
                             'valeur' => 0,
-                            'type' => $type,
-                            'intitule' => $dataReceived['field'].'_time'
-                            )
+                            'type' => 'admin',
+                            'intitule' => $post_field . '_time',
+                            'created_at' => time(),
+                        )
                     );
                 } else {
                     DB::update(
-                        prefix_table("misc"),
+                        prefixTable('misc'),
                         array(
-                            'valeur' => 0
-                            ),
-                        "type = %s AND intitule = %s",
-                        $type,
-                        $dataReceived['field']
+                            'valeur' => 0,
+                            'updated_at' => time(),
+                        ),
+                        'type = %s AND intitule = %s',
+                        'admin',
+                        $post_field
                     );
                 }
             }
         }
 
         // special Cases
-        if ($dataReceived['field'] === "cpassman_url") {
+        if ($post_field === 'cpassman_url') {
             // update also jsUrl for CSFP protection
-            $jsUrl = $dataReceived['value'].'/includes/libraries/csrfp/js/csrfprotector.js';
-            $csrfp_file = "../includes/libraries/csrfp/libs/csrfp.config.php";
+            $jsUrl = $post_value . '/includes/libraries/csrfp/js/csrfprotector.js';
+            $csrfp_file = '../includes/libraries/csrfp/libs/csrfp.config.php';
             $data = file_get_contents($csrfp_file);
             $posJsUrl = strpos($data, '"jsUrl" => "');
             $posEndLine = strpos($data, '",', $posJsUrl);
             $line = substr($data, $posJsUrl, ($posEndLine - $posJsUrl + 2));
-            $newdata = str_replace($line, '"jsUrl" => "'.filter_var($jsUrl, FILTER_SANITIZE_STRING).'",', $data);
+            $newdata = str_replace($line, '"jsUrl" => "' . filter_var($jsUrl, FILTER_SANITIZE_FULL_SPECIAL_CHARS) . '",', $data);
             file_put_contents($csrfp_file, $newdata);
-        } elseif ($dataReceived['field'] === "restricted_to_input" && $dataReceived['value'] === "0") {
+        } elseif ($post_field === 'restricted_to_input' && (int) $post_value === 0) {
             DB::update(
-                prefix_table("misc"),
+                prefixTable('misc'),
                 array(
-                    'valeur' => 0
-                    ),
-                "type = %s AND intitule = %s",
-                $type,
+                    'valeur' => 0,
+                    'updated_at' => time(),
+                ),
+                'type = %s AND intitule = %s',
+                'admin',
                 'restricted_to_roles'
             );
         }
 
-        // store in SESSION
-        $SETTINGS[$dataReceived['field']] = $dataReceived['value'];
+        // Avoid break tp.config.php file with ' in parameter.
+        $dataReceived['value'] = addslashes((string) $dataReceived['value']);
 
-        // save change in config file
-        handleConfigFile("update", $dataReceived['field'], $dataReceived['value']);
+        // store in SESSION
+        $SETTINGS[$post_field] = $post_value;
 
         // Encrypt data to return
         echo prepareExchangedData(
             array(
-                "error" => "",
-                "misc" => $counter." ; ".$SETTINGS[$dataReceived['field']]
+                'error' => false,
+                'misc' => $counter . ' ; ' . $SETTINGS[$post_field],
+                'message' => empty($post_translate) === false ? $lang->get($post_translate) : '',
             ),
-            "encode"
+            'encode'
         );
         break;
 
-    case "get_values_for_statistics":
+    case 'get_values_for_statistics':
         // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
 
         // Encrypt data to return
         echo prepareExchangedData(
-            getStatisticsData(),
-            "encode"
+            getStatisticsData($SETTINGS),
+            'encode'
         );
 
         break;
 
-    case "save_sending_statistics":
+    case 'save_sending_statistics':
         // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
 
         // send statistics
         if (null !== $post_status) {
-            DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "send_stats");
+            DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'send_stats');
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'type' => "admin",
-                        "intitule" => "send_stats",
-                        'valeur' => $post_status
+                        'type' => 'admin',
+                        'intitule' => 'send_stats',
+                        'valeur' => $post_status,
+                        'created_at' => time(),
                     )
                 );
             } else {
                 DB::update(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'valeur' => $post_status
+                        'valeur' => $post_status,
+                        'updated_at' => time(),
                     ),
-                    "type = %s AND intitule = %s",
-                    "admin",
-                    "send_stats"
+                    'type = %s AND intitule = %s',
+                    'admin',
+                    'send_stats'
                 );
             }
             $SETTINGS['send_stats'] = $post_status;
         } else {
-            $SETTINGS['send_stats'] = "0";
+            $SETTINGS['send_stats'] = '0';
         }
-
-        // save change in config file
-        handleConfigFile("update", 'send_stats', $SETTINGS['send_stats']);
 
         // send statistics items
         if (null !== $post_list) {
-            DB::query("SELECT * FROM ".prefix_table("misc")." WHERE type = %s AND intitule = %s", "admin", "send_statistics_items");
+            DB::query('SELECT * FROM ' . prefixTable('misc') . ' WHERE type = %s AND intitule = %s', 'admin', 'send_statistics_items');
             $counter = DB::count();
-            if ($counter == 0) {
+            if ($counter === 0) {
                 DB::insert(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'type' => "admin",
-                        "intitule" => "send_statistics_items",
-                        'valeur' => $post_list
+                        'type' => 'admin',
+                        'intitule' => 'send_statistics_items',
+                        'valeur' => $post_list,
+                        'created_at' => time(),
                     )
                 );
             } else {
                 DB::update(
-                    prefix_table("misc"),
+                    prefixTable('misc'),
                     array(
-                        'valeur' => $post_list
+                        'valeur' => $post_list,
+                        'updated_at' => time(),
                     ),
-                    "type = %s AND intitule = %s",
-                    "admin",
-                    "send_statistics_items"
+                    'type = %s AND intitule = %s',
+                    'admin',
+                    'send_statistics_items'
                 );
             }
             $SETTINGS['send_statistics_items'] = $post_list;
         } else {
-            $SETTINGS['send_statistics_items'] = "";
+            $SETTINGS['send_statistics_items'] = '';
         }
-
-        // save change in config file
-        handleConfigFile("update", 'send_statistics_items', $SETTINGS['send_statistics_items']);
 
         // send data
-        echo '[{"result" : "'.addslashes($LANG['done']).'" , "error" : ""}]';
+        echo '[{"error" : false}]';
         break;
 
-    case "admin_ldap_test_configuration":
-        // Check
-        if (null === $post_option || empty($post_option) === true) {
-            echo '[{ "option" : "admin_ldap_test_configuration", "error" : "No options" }]';
+    case 'is_backup_table_existing':
+        // Check KEY and rights
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
             break;
         }
 
-        require_once 'main.functions.php';
+        if (DB::query("SHOW TABLES LIKE '" . prefixTable('sk_reencrypt_backup') . "'")) {
+            if (DB::count() === 1) {
+                echo 1;
+            } else {
+                echo 0;
+            }
+        } else {
+            echo 0;
+        }
+
+        break;
+
+    case 'get_list_of_roles':
+        // Check KEY and rights
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
 
         // decrypt and retreive data in JSON format
-        $dataReceived = prepareExchangedData($post_option, "decode");
+        $dataReceived = prepareExchangedData(
+            $post_data,
+            'decode'
+        );
 
-        if (empty($dataReceived[0]['username_pwd']) || empty($dataReceived[0]['username'])) {
-            echo '[{ "option" : "admin_ldap_test_configuration", "error" : "No user credentials" }]';
-            break;
-        }
-
-        $debug_ldap = $ldap_suffix = "";
-
-        //Multiple Domain Names
-        if (strpos(html_entity_decode($dataReceived[0]['username']), '\\') === true) {
-            $ldap_suffix = "@".substr(html_entity_decode($dataReceived[0]['username']), 0, strpos(html_entity_decode($dataReceived[0]['username']), '\\'));
-            $dataReceived[0]['username'] = substr(html_entity_decode($dataReceived[0]['username']), strpos(html_entity_decode($dataReceived[0]['username']), '\\') + 1);
-        }
-        if ($dataReceived[0]['ldap_type'] === 'posix-search') {
-            $ldapURIs = "";
-            foreach (explode(",", $dataReceived[0]['ldap_domain_controler']) as $domainControler) {
-                if ($dataReceived[0]['ldap_ssl_input'] == 1) {
-                    $ldapURIs .= "ldaps://".$domainControler.":".$dataReceived[0]['ldap_port']." ";
-                } else {
-                    $ldapURIs .= "ldap://".$domainControler.":".$dataReceived[0]['ldap_port']." ";
-                }
-            }
-
-            $debug_ldap .= "LDAP URIs : ".$ldapURIs."<br/>";
-            $ldapconn = ldap_connect($ldapURIs);
-
-            if ($dataReceived[0]['ldap_tls_input']) {
-                ldap_start_tls($ldapconn);
-            }
-
-            $debug_ldap .= "LDAP connection : ".($ldapconn ? "Connected" : "Failed")."<br/>";
-
-            if ($ldapconn) {
-                $debug_ldap .= "DN : ".$dataReceived[0]['ldap_bind_dn']." -- ".$dataReceived[0]['ldap_bind_passwd']."<br/>";
-                ldap_set_option($ldapconn, LDAP_OPT_PROTOCOL_VERSION, 3);
-                ldap_set_option($ldapconn, LDAP_OPT_REFERRALS, 0);
-                $ldapbind = ldap_bind($ldapconn, $dataReceived[0]['ldap_bind_dn'], $dataReceived[0]['ldap_bind_passwd']);
-
-                $debug_ldap .= "LDAP bind : ".($ldapbind ? "Bound" : "Failed")."<br/>";
-
-                if ($ldapbind) {
-                    $filter = "(&(".$dataReceived[0]['ldap_user_attribute']."=".$dataReceived[0]['username'].")(objectClass=".$dataReceived[0]['ldap_object_class']."))";
-                    //echo $filter;
-                    $result = ldap_search(
-                        $ldapconn,
-                        $dataReceived[0]['ldap_search_base'],
-                        $filter,
-                        array('dn', 'mail', 'givenname', 'sn', 'uid')
-                    );
-                    if (isset($dataReceived[0]['ldap_usergroup'])) {
-                        $GroupRestrictionEnabled = false;
-                        $filter_group = "memberUid=".$dataReceived[0]['username'];
-                        $result_group = ldap_search(
-                            $ldapconn,
-                            $dataReceived[0]['ldap_search_base'],
-                            $filter_group,
-                            array('dn')
-                        );
-
-                        $debug_ldap .= 'Search filter (group): '.$filter_group."<br/>".
-                            'Results : '.str_replace("\n", "<br>", print_r(ldap_get_entries($ldapconn, $result_group), true))."<br/>";
-
-                        if ($result_group) {
-                            $entries = ldap_get_entries($ldapconn, $result_group);
-
-                            if ($entries['count'] > 0) {
-                                // Now check if group fits
-                                for ($i = 0; $i < $entries['count']; $i++) {
-                                    $parsr = ldap_explode_dn($entries[$i]['dn'], 0);
-                                    if (str_replace(array('CN=', 'cn='), '', $parsr[0]) === $SETTINGS['ldap_usergroup']) {
-                                    $GroupRestrictionEnabled = true;
-                                    break;
-                                    }
-                                }
-
-                            }
-                        }
-
-                        $debug_ldap .= 'Find user in Group: '.$GroupRestrictionEnabled."<br/>";
-                    }
-
-                    $debug_ldap .= 'Search filter : '.$filter."<br/>".
-                            'Results : '.str_replace("\n", "<br>", print_r(ldap_get_entries($ldapconn, $result), true))."<br/>";
-
-                    if (ldap_count_entries($ldapconn, $result)) {
-                        // try auth
-                        $result = ldap_get_entries($ldapconn, $result);
-                        $user_dn = $result[0]['dn'];
-                        $ldapbind = ldap_bind($ldapconn, $user_dn, $dataReceived[0]['username_pwd']);
-                        if ($ldapbind) {
-                            $debug_ldap .= "Successfully connected";
-                        } else {
-                            $debug_ldap .= "Error - Cannot connect user!";
-                        }
-                    }
-                } else {
-                    $debug_ldap .= "Error - Could not bind server!";
-                }
-            } else {
-                $debug_ldap .= "Error - Could not connect to server!";
-            }
+        // prepare data
+        $sourcePage = filter_var($dataReceived['source_page'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+        if ($sourcePage === 'ldap') {
+            $selected_administrated_by = isset($SETTINGS['ldap_new_user_is_administrated_by']) && $SETTINGS['ldap_new_user_is_administrated_by'] === '0' ? 1 : 0;
+            $selected_new_user_role = isset($SETTINGS['ldap_new_user_role']) && $SETTINGS['ldap_new_user_role'] === '0' ? 1 : 0;
+        } elseif ($sourcePage === 'oauth') {
+            $selected_administrated_by = isset($SETTINGS['oauth_new_user_is_administrated_by']) && $SETTINGS['oauth_new_user_is_administrated_by'] === '0' ? 1 : 0;
+            $selected_new_user_role = isset($SETTINGS['oauth_selfregistered_user_belongs_to_role']) && $SETTINGS['oauth_selfregistered_user_belongs_to_role'] === '0' ? 1 : '';
         } else {
-            $debug_ldap .= "Get all ldap params: <br/>".
-                '  - base_dn : '.$dataReceived[0]['ldap_domain_dn']."<br/>".
-                '  - account_suffix : '.$dataReceived[0]['ldap_suffix']."<br/>".
-                '  - domain_controllers : '.$dataReceived[0]['ldap_domain_controler']."<br/>".
-                '  - ad_port : '.$dataReceived[0]['ldap_port']."<br/>".
-                '  - use_ssl : '.$dataReceived[0]['ldap_ssl_input']."<br/>".
-                '  - use_tls : '.$dataReceived[0]['ldap_tls_input']."<br/>*********<br/>";
-
-            $adldap = new SplClassLoader('adLDAP', '../includes/libraries/LDAP');
-            $adldap->register();
-
-            // Posix style LDAP handles user searches a bit differently
-            if ($dataReceived[0]['ldap_type'] === 'posix') {
-                $ldap_suffix = ','.$dataReceived[0]['ldap_suffix'].','.$dataReceived[0]['ldap_domain_dn'];
-            } elseif ($dataReceived[0]['ldap_type'] === 'windows' && $ldap_suffix === '') { //Multiple Domain Names
-                $ldap_suffix = $dataReceived[0]['ldap_suffix'];
-            }
-            $adldap = new adLDAP\adLDAP(
-                array(
-                    'base_dn' => $dataReceived[0]['ldap_domain_dn'],
-                    'account_suffix' => $ldap_suffix,
-                    'domain_controllers' => explode(",", $dataReceived[0]['ldap_domain_controler']),
-                    'ad_port' => $dataReceived[0]['ldap_port'],
-                    'use_ssl' => $dataReceived[0]['ldap_ssl_input'],
-                    'use_tls' => $dataReceived[0]['ldap_tls_input']
-                )
+            echo prepareExchangedData(
+                [], 
+                'encode'
             );
-
-            $debug_ldap .= "Create new adldap object : ".$adldap->getLastError()."<br/><br/>";
-
-            // openLDAP expects an attribute=value pair
-            if ($dataReceived[0]['ldap_type'] === 'posix') {
-                $auth_username = $dataReceived[0]['ldap_user_attribute'].'='.$dataReceived[0]['username'];
-            } else {
-                $auth_username = $dataReceived[0]['username'];
-            }
-
-            // authenticate the user
-            if ($adldap->authenticate($auth_username, html_entity_decode($dataReceived[0]['username_pwd']))) {
-                $ldapConnection = "Successfull";
-            } else {
-                $ldapConnection = "Not possible to get connected with this user";
-            }
-
-            $debug_ldap .= "After authenticate : ".$adldap->getLastError()."<br/><br/>".
-                "ldap status : ".$ldapConnection; //Debug
-        }
-
-        echo '[{ "option" : "admin_ldap_test_configuration", "results" : "'.$antiXss->xss_clean($debug_ldap).'" }]';
-
-        break;
-
-
-    case "is_backup_table_existing":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
-            break;
-        }
-
-        if ($result = DB::query("SHOW TABLES LIKE '".prefix_table("sk_reencrypt_backup")."'")) {
-            if (DB::count() === 1) {
-                echo "1";
-            } else {
-                echo "0";
-            }
-        } else {
-            echo "0";
-        }
-
-        break;
-
-
-    case "get_list_of_roles":
-        // Check KEY and rights
-        if ($post_key !== $_SESSION['key']) {
-            echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    
             break;
         }
 
@@ -2207,31 +2364,183 @@ switch ($post_type) {
         array_push(
             $json,
             array(
-                "id" => 0,
-                "title" => addslashes($LANG['god']),
-                "selected_administrated_by" => isset($SETTINGS['ldap_new_user_is_administrated_by']) && $SETTINGS['ldap_new_user_is_administrated_by'] === "0" ? 1 : 0,
-                "selected_role" => isset($SETTINGS['ldap_new_user_role']) && $SETTINGS['ldap_new_user_role'] === "0" ? 1 : 0
+                'id' => '0',
+                'title' => $lang->get('god'),
+                'selected_administrated_by' => $selected_administrated_by,
+                'selected_role' => $selected_new_user_role,
             )
         );
 
         $rows = DB::query(
-            "SELECT id, title
-            FROM ".prefix_table("roles_title")."
-            ORDER BY title ASC"
+            'SELECT id, title
+                FROM ' . prefixTable('roles_title') . '
+                ORDER BY title ASC'
         );
         foreach ($rows as $record) {
+            if ($sourcePage === 'ldap') {
+                $selected_administrated_by = isset($SETTINGS['ldap_new_user_is_administrated_by']) && $SETTINGS['ldap_new_user_is_administrated_by'] === $record['id'] ? 1 : 0;
+                $selected_new_user_role = isset($SETTINGS['ldap_new_user_role']) && $SETTINGS['ldap_new_user_role'] === $record['id'] ? 1 : 0;
+            } elseif ($sourcePage === 'oauth') {
+                $selected_administrated_by = isset($SETTINGS['oauth_new_user_is_administrated_by']) && $SETTINGS['oauth_new_user_is_administrated_by'] === $record['id'] ? 1 : 0;
+                $selected_new_user_role = isset($SETTINGS['oauth_selfregistered_user_belongs_to_role']) && $SETTINGS['oauth_selfregistered_user_belongs_to_role'] === $record['id'] ? 1 : 0;
+            }
             array_push(
                 $json,
                 array(
-                    "id" => $record['id'],
-                    "title" => addslashes($record['title']),
-                    "selected_administrated_by" => isset($SETTINGS['ldap_new_user_is_administrated_by']) === true && $SETTINGS['ldap_new_user_is_administrated_by'] === $record['id'] ? 1 : 0,
-                    "selected_role" => isset($SETTINGS['ldap_new_user_role']) === true && $SETTINGS['ldap_new_user_role'] === $record['id'] ? 1 : 0,
+                    'id' => $record['id'],
+                    'title' => addslashes($record['title']),
+                    'selected_administrated_by' => $selected_administrated_by,
+                    'selected_role' => $selected_new_user_role,
                 )
             );
         }
 
-        echo prepareExchangedData($json, "encode");
+        echo prepareExchangedData(
+            $json, 
+            'encode'
+        );
 
         break;
+
+    case 'save_user_change':
+        // Check KEY and rights
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+
+        // decrypt and retrieve data in JSON format
+        $dataReceived = prepareExchangedData(
+            $post_data,
+            'decode'
+        );
+
+        $post_increment_id = isset($dataReceived['increment_id']) === true ? filter_var($dataReceived['increment_id'], FILTER_SANITIZE_NUMBER_INT) : '';
+        $post_field = filter_var($dataReceived['field'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+        $post_value = filter_var($dataReceived['value'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+
+        if (is_numeric($post_increment_id) === false) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('no_user'),
+                ),
+                'encode'
+            );
+            break;
+        }
+        
+        //update.
+        DB::debugMode(false);
+        DB::update(
+            prefixTable('api'),
+            array(
+                $post_field => $post_value,
+            ),
+            'increment_id = %i',
+            (int) $post_increment_id
+        );
+        DB::debugMode(false);
+        //log
+        logEvents($SETTINGS, 'system', 'api_user_readonly', (string) $session->get('user-id'), $session->get('user-login'));
+
+        echo prepareExchangedData(
+            array(
+                'error' => false,
+                'message' => '',
+            ),
+            'encode'
+        );
+
+        break;
+    
+    case "tablesIntegrityCheck":
+        // Check KEY and rights
+        if ($post_key !== $session->get('key')) {
+            echo prepareExchangedData(
+                array(
+                    'error' => true,
+                    'message' => $lang->get('key_is_not_correct'),
+                ),
+                'encode'
+            );
+            break;
+        }
+
+        $ret = tablesIntegrityCheck();
+        
+        echo prepareExchangedData(
+            array(
+                'error' => $ret['error'],
+                'message' => $ret['message'],
+                'tables' => json_encode($ret['array'], JSON_FORCE_OBJECT),
+            ),
+            'encode'
+        );
+
+        break;
+}
+
+
+/**
+ * Check the integrity of the tables
+ * 
+ * @return array
+ */
+function tablesIntegrityCheck(): array
+{
+    // Get integrity tables file
+    $integrityTablesFile = TEAMPASS_ROOT_PATH . '/includes/tables_integrity.json';
+    if (file_exists($integrityTablesFile) === false) {
+        return [
+            'error' => true,
+            'message' => "Integrity file has not been found."
+        ];
+    }
+    // Convert json to array
+    $integrityTables = json_decode(file_get_contents($integrityTablesFile), true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        return [
+            'error' => true,
+            'message' => "Integrity file is corrupted"
+        ];
+    }
+    // Get all tables
+    $tables = [];
+    foreach (DB::queryFirstColumn("SHOW TABLES") as $table) {
+        $tables[] = str_replace(DB_PREFIX, "", $table);;
+    }
+    // Prepare the integrity check
+    $tablesInError = [];
+    // Check if the tables are in the integrity file
+    foreach ($tables as $table) {
+        $tableFound = false;
+        $tableHash = "";
+        foreach ($integrityTables as $integrityTable) {
+            if ($integrityTable["table_name"] === $table) {
+                $tableFound = true;
+                $tableHash = $integrityTable["structure_hash"];
+                break; // Sortir de la boucle si la table est trouvée
+            }
+        }
+
+        if ($tableFound === true) {
+            $createTable = DB::queryFirstRow("SHOW CREATE TABLE ".DB_PREFIX."$table");
+            $currentHash = hash('sha256', $createTable['Create Table']);
+            if ($currentHash !== $tableHash) {
+                $tablesInError[] = DB_PREFIX.$table;
+            }            
+        }
+    }
+    return [
+        'error' => false,
+        'array' => $tablesInError,
+        'message' => ""
+    ];
 }

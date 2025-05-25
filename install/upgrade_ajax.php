@@ -1,82 +1,240 @@
 <?php
 /**
- * @package       upgrade.ajax.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      upgrade_ajax.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
+use TiBeN\CrontabManager\CrontabJob;
+use TiBeN\CrontabManager\CrontabAdapter;
+use TiBeN\CrontabManager\CrontabRepository;
+use TeampassClasses\SuperGlobal\SuperGlobal;
+use TeampassClasses\Language\Language;
+use TeampassClasses\PasswordManager\PasswordManager;
+use TeampassClasses\ConfigManager\ConfigManager;
 
-require_once('../sources/SecureHandler.php');
-session_start();
+
+$_SESSION = [];
+
+function settingsConsistencyCheck(): array
+{
+    $settingsFile = __DIR__.'/../includes/config/settings.php';
+    require_once $settingsFile;
+    require_once __DIR__.'/tp.functions.php';
+
+    if (defined('DB_PASSWD') === false && isset($pass) === true) {
+        // We need to convert settings.php file from V2 to V3 format
+        
+        //Do a copy of the existing file
+        if (!copy(
+            $settingsFile,
+            $settingsFile . '.' . date(
+                'Y_m_d_H_i_s',
+                mktime((int) date('H'), (int) date('i'), (int) date('s'), (int) date('m'), (int) date('d'), (int) date('y'))
+            )
+        )) {
+            $error = error_get_last();
+            $errorMessage = isset($error['message']) ? $error['message'] : 'Unknown error.';
+            return [
+                'error' => '[{
+                    "error" : "Error: '.$errorMessage.'. Please do it by yourself and click on button Launch.",
+                    "index" : ""
+                }]',
+                'value' => false
+            ];
+        }
+
+
+        // Handle teampass-seckey.txt file
+        if (file_exists(SECUREPATH.'/teampass-seckey.txt')) {
+            // do a copy
+            if (!copy(
+                SECUREPATH.'/teampass-seckey.txt',
+                SECUREPATH.'/teampass-seckey.txt' . '.' . date(
+                    'Y_m_d_H_i_s',
+                    mktime((int) date('H'), (int) date('i'), (int) date('s'), (int) date('m'), (int) date('d'), (int) date('y'))
+                )
+            )) {
+                $error = error_get_last();
+                $errorMessage = isset($error['message']) ? $error['message'] : 'Unknown error.';
+                return [
+                    'error' => '[{
+                        "error" : "Error: '.$errorMessage.'. Please do it by yourself and click on button Launch.",
+                        "index" : ""
+                    }]',
+                    'value' => false
+                ];
+            }
+
+            // prepare new file
+            $filesecure = generateRandomKey();
+            define('SECUREFILE', $filesecure);
+        } else {
+            return [
+                'error' => '[{
+                    "error" : "'.SECUREPATH.'/teampass-seckey.txt file does not exist. Please recover it and click on button Launch.",
+                    "index" : ""
+                }]',
+                'value' => false
+            ];
+        }
+
+
+        // Ensure DB is read as UTF8
+        if (defined('DB_ENCODING') === false) {
+            define('DB_ENCODING', "utf8");
+        }
+
+        // Delete olf file
+        unlink($settingsFile);
+        // Now create new file
+        $file_handled = fopen($settingsFile, 'w');
+        
+        $settingsTxt = '<?php
+// DATABASE connexion parameters
+define("DB_HOST", "' . DB_HOST . '");
+define("DB_USER", "' . DB_USER . '");
+define("DB_PASSWD", "' . DB_PASSWD . '");
+define("DB_NAME", "' . DB_NAME . '");
+define("DB_PREFIX", "' . DB_PREFIX . '");
+define("DB_PORT", "' . DB_PORT . '");
+define("DB_ENCODING", "' . DB_ENCODING . '");
+define("DB_SSL", false); // if DB over SSL then comment this line
+// if DB over SSL then uncomment the following lines
+define("DB_SSL", array(
+    "key" => "' . DB_SSL['key'] . '",
+    "cert" => "' . DB_SSL['cert'] . '",
+    "ca_cert" => "' . DB_SSL['ca_cert'] . '",
+    "ca_path" => "' . DB_SSL['ca_path'] . '",
+    "cipher" => "' . DB_SSL['cipher'] . '"
+));
+define("DB_CONNECT_OPTIONS", array(
+    MYSQLI_OPT_CONNECT_TIMEOUT => 10
+));
+define("SECUREPATH", "' . SECUREPATH . '");
+define("SECUREFILE", "' . SECUREFILE. '");';
+
+		if (defined('IKEY') === true) $settingsTxt .= '
+define("IKEY", "' . IKEY . '");';
+		else $settingsTxt .= '
+define("IKEY", "");';
+		if (defined('SKEY') === true) $settingsTxt .= '
+define("SKEY", "' . SKEY . '");';
+		else $settingsTxt .= '
+define("SKEY", "");';
+		if (defined('HOST') === true) $settingsTxt .= '
+define("HOST", "' . HOST . '");';
+		else $settingsTxt .= '
+define("HOST", "");';
+
+
+        $settingsTxt .= '
+
+if (isset($_SESSION[\'settings\'][\'timezone\']) === true) {
+    date_default_timezone_set($_SESSION[\'settings\'][\'timezone\']);
+}
+';
+
+        $fileCreation = fwrite(
+            $file_handled,
+            utf8_encode($settingsTxt)
+        );
+
+        fclose($file_handled);
+        if ($fileCreation === false) {
+            return [
+                'error' => '[{
+                    "error" : "Setting.php file could not be created in /includes/config/ folder. Please check the path and the rights.",
+                    "index" : ""
+                }]',
+                'value' => false
+            ];
+        }
+
+        return [
+            'error' => '',
+            'value' => true
+        ];
+    }
+
+    // No need to create new settings.php file
+    return [
+        'error' => '',
+        'value' => false
+    ];
+}
+
+// Check and build if necessary the new settings.php file
+$check = settingsConsistencyCheck();
+$settingsFileNewlyCreated = $check['value'];
+
+// Load functions
+require_once __DIR__.'/../sources/main.functions.php';
+
+// init
+loadClasses('DB');
+$superGlobal = new SuperGlobal();
+$lang = new Language(); 
+
 error_reporting(E_ERROR | E_PARSE);
 $_SESSION['CPM'] = 1;
 
+// Load config
+$configManager = new ConfigManager();
+$SETTINGS = $configManager->getAllSettings();
+
 require_once '../includes/language/english.php';
 require_once '../includes/config/include.php';
-
-// manage settings.php file
-if (!file_exists("../includes/config/settings.php")) {
-    if (file_exists("../includes/settings.php")) {
-        // since 2.1.27, this file has changed location
-        if (copy("../includes/settings.php", "../includes/config/settings.php")) {
-            unlink("../includes/settings.php");
-        } else {
-            echo 'document.getElementById("res_step1_error").innerHTML = '.
-                '"Could not copy /includes/settings.php to /includes/config/settings.php! '.
-                'Please do it manually and press button Launch.";';
-            echo 'document.getElementById("loader").style.display = "none";';
-            exit;
-        }
-    } else {
-        echo 'document.getElementById("res_step1_error").innerHTML = '.
-            '"File settings.php does not exist in folder includes/! '.
-            'If it is an upgrade, it should be there, otherwise select install!";';
-        echo 'document.getElementById("loader").style.display = "none";';
-        exit;
-    }
-}
 require_once '../includes/config/settings.php';
-require_once '../sources/main.functions.php';
-
-
-//define pbkdf2 iteration count
-define('ITCOUNT', '2072');
-
+require_once 'tp.functions.php';
 
 // Prepare POST variables
-$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING);
-$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_STRING, FILTER_FLAG_NO_ENCODE_QUOTES);
+$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_FULL_SPECIAL_CHARS, FILTER_FLAG_NO_ENCODE_QUOTES);
 $post_index = filter_input(INPUT_POST, 'index', FILTER_SANITIZE_NUMBER_INT);
-$post_multiple = filter_input(INPUT_POST, 'multiple', FILTER_SANITIZE_STRING);
-$post_login = filter_input(INPUT_POST, 'login', FILTER_SANITIZE_STRING);
-$post_pwd = filter_input(INPUT_POST, 'pwd', FILTER_SANITIZE_STRING);
-$post_fullurl = filter_input(INPUT_POST, 'fullurl', FILTER_SANITIZE_STRING);
-$post_abspath = filter_input(INPUT_POST, 'abspath', FILTER_SANITIZE_STRING);
-$post_no_previous_sk = filter_input(INPUT_POST, 'no_previous_sk', FILTER_SANITIZE_STRING);
-$post_session_salt = filter_input(INPUT_POST, 'session_salt', FILTER_SANITIZE_STRING);
-$post_previous_sk = filter_input(INPUT_POST, 'previous_sk', FILTER_SANITIZE_STRING);
-$post_no_maintenance_mode = filter_input(INPUT_POST, 'no_maintenance_mode', FILTER_SANITIZE_STRING);
-$post_prefix_before_convert = filter_input(INPUT_POST, 'prefix_before_convert', FILTER_SANITIZE_STRING);
-$post_sk_path = filter_input(INPUT_POST, 'sk_path', FILTER_SANITIZE_STRING);
-$post_url_path = filter_input(INPUT_POST, 'url_path', FILTER_SANITIZE_STRING);
+$post_multiple = filter_input(INPUT_POST, 'multiple', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_login = filter_input(INPUT_POST, 'login', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_pwd = filter_input(INPUT_POST, 'pwd', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_fullurl = filter_input(INPUT_POST, 'fullurl', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_abspath = filter_input(INPUT_POST, 'abspath', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_no_previous_sk = filter_input(INPUT_POST, 'no_previous_sk', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_session_salt = filter_input(INPUT_POST, 'session_salt', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_previous_sk = filter_input(INPUT_POST, 'previous_sk', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_no_maintenance_mode = filter_input(INPUT_POST, 'no_maintenance_mode', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_prefix_before_convert = filter_input(INPUT_POST, 'prefix_before_convert', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_sk_path = filter_input(INPUT_POST, 'sk_path', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_url_path = filter_input(INPUT_POST, 'url_path', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
 
 
 // Test DB connexion
-$pass = defuse_return_decrypted($pass);
-if (mysqli_connect(
-    $server,
-    $user,
-    $pass,
-    $database,
-    $port
-)
-) {
+$pass = defuse_return_decrypted(DB_PASSWD);
+$server = DB_HOST;
+$pre = DB_PREFIX;
+$database = DB_NAME;
+$port = intval(DB_PORT);
+$user = DB_USER;
+
+try {
     $db_link = mysqli_connect(
         $server,
         $user,
@@ -84,210 +242,130 @@ if (mysqli_connect(
         $database,
         $port
     );
-    $res = "Connection is successful";
-} else {
-    $res = "Impossible to get connected to server. Error is: ".addslashes(mysqli_connect_error());
-    echo 'document.getElementById("but_next").disabled = "disabled";';
-    echo 'document.getElementById("res_".$post_type).innerHTML = "'.$res.'";';
-    echo 'document.getElementById("loader").style.display = "none";';
-    return false;
+    $res = 'Connection is successful';
+    $db_link->set_charset(DB_ENCODING);
+} catch (Exception $e) {
+    echo '[{
+        "error" : "Impossible to get connected to server. Ensure that file includes/config/settings.php exists and is correct.",
+        "index" : ""
+    }]';
+    exit;
 }
-
-
-// Load libraries
-require_once '../includes/libraries/protect/SuperGlobal/SuperGlobal.php';
-$superGlobal = new protect\SuperGlobal\SuperGlobal();
 
 // Set Session
-$superGlobal->put("CPM", 1, "SESSION");
-$superGlobal->put("db_encoding", "utf8", "SESSION");
-$_SESSION['settings']['loaded'] = "";
+$superGlobal->put('CPM', 1, 'SESSION');
+$superGlobal->put('db_encoding', 'utf8', 'SESSION');
+$_SESSION['settings']['loaded'] = '';
 if (empty($post_fullurl) === false) {
-    $superGlobal->put("fullurl", $post_fullurl, "SESSION");
+    $superGlobal->put('fullurl', $post_fullurl, 'SESSION');
 }
 if (empty($abspath) === false) {
-    $superGlobal->put("abspath", $abspath, "SESSION");
+    $superGlobal->put('abspath', $abspath, 'SESSION');
 }
 
 // Get Sessions
-$session_url_path = $superGlobal->get("url_path", "SESSION");
-
-################
-## Function permits to get the value from a line
-################
-/**
- * @param string $val
- */
-function getSettingValue($val)
-{
-    $val = trim(strstr($val, "="));
-    return trim(str_replace('"', '', substr($val, 1, strpos($val, ";") - 1)));
-}
-
-################
-## Function permits to check if a column exists, and if not to add it
-################
-function addColumnIfNotExist($dbname, $column, $columnAttr = "VARCHAR(255) NULL")
-{
-    global $db_link;
-    $exists = false;
-    $columns = mysqli_query($db_link, "show columns from $dbname");
-    while ($col = mysqli_fetch_assoc($columns)) {
-        if ($col['Field'] == $column) {
-            $exists = true;
-            break;
-        }
-    }
-    if (!$exists) {
-        return mysqli_query($db_link, "ALTER TABLE `$dbname` ADD `$column`  $columnAttr");
-    }
-}
-
-function addIndexIfNotExist($table, $index, $sql)
-{
-    global $db_link;
-
-    $mysqli_result = mysqli_query($db_link, "SHOW INDEX FROM $table WHERE key_name LIKE \"$index\"");
-    $res = mysqli_fetch_row($mysqli_result);
-
-    // if index does not exist, then add it
-    if (!$res) {
-        $res = mysqli_query($db_link, "ALTER TABLE `$table` ".$sql);
-    }
-
-    return $res;
-}
-
-function tableExists($tablename)
-{
-    global $db_link, $database;
-
-    $res = mysqli_query(
-        $db_link,
-        "SELECT COUNT(*) as count
-        FROM information_schema.tables
-        WHERE table_schema = '".$database."'
-        AND table_name = '$tablename'"
-    );
-
-    if ($res > 0) {
-        return true;
-    } else {
-        return false;
-    }
-}
+$session_url_path = $superGlobal->get('url_path', 'SESSION');
 
 if (isset($post_type)) {
     switch ($post_type) {
-        case "step0":
+        case 'step0':
             // erase session table
             $_SESSION = array();
             setcookie('pma_end_session');
             session_destroy();
 
-            echo 'document.getElementById("res_step0").innerHTML = "";';
             require_once 'libs/aesctr.php';
-
+            
             // check if path in settings.php are consistent
-            if (!is_dir(SECUREPATH)) {
-                echo 'document.getElementById("but_next").disabled = "disabled";';
-                echo 'document.getElementById("res_step0").innerHTML = "Error in settings.php file!<br>Check correctness of path indicated in file `includes/config/settings.php`.<br>Reload this page and retry.";';
-                echo 'document.getElementById("loader").style.display = "none";';
-                break;
+            if (defined(SECUREPATH) === true) {
+                if (!is_dir(SECUREPATH)) {
+                    echo '[{'.
+                        '"error" : "Error in settings.php file!<br>Check correctness of path indicated in file `includes/config/settings.php`.<br>Reload this page and retry.",'.
+                        '"index" : ""'.
+                    '}]';
+                    break;
+                }
+                if (!file_exists(SECUREPATH . '/sk.php')) {
+                    echo '[{'.
+                        '"error" : "Error in settings.php file!<br>Check correctness of path indicated in file `includes/config/settings.php`.<br>Reload this page and retry.",'.
+                        '"index" : ""'.
+                    '}]';
+                    break;
+                }
             }
-            if (!file_exists(SECUREPATH."/sk.php")) {
-                echo 'document.getElementById("but_next").disabled = "disabled";';
-                echo 'document.getElementById("res_step0").innerHTML = "Error in settings.php file!<br>Check that file `sk.php` exists as defined in `includes/config/settings.php`.<br>Reload this page and retry.";';
-                echo 'document.getElementById("loader").style.display = "none";';
-                break;
-            }
-
-            $_SESSION['settings']['cpassman_dir'] = "..";
-            require_once '../includes/libraries/PasswordLib/Random/Generator.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source/MTRand.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source/Rand.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source/UniqID.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source/URandom.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source/MicroTime.php';
-            require_once '../includes/libraries/PasswordLib/Random/Source/CAPICOM.php';
-            require_once '../includes/libraries/PasswordLib/Random/Mixer.php';
-            require_once '../includes/libraries/PasswordLib/Random/AbstractMixer.php';
-            require_once '../includes/libraries/PasswordLib/Random/Mixer/Hash.php';
-            require_once '../includes/libraries/PasswordLib/Password/AbstractPassword.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/Hash.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/Crypt.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/SHA256.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/SHA512.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/PHPASS.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/PHPBB.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/PBKDF.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/MediaWiki.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/MD5.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/Joomla.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/Drupal.php';
-            require_once '../includes/libraries/PasswordLib/Password/Implementation/APR1.php';
-            require_once '../includes/libraries/PasswordLib/PasswordLib.php';
-            $pwdlib = new PasswordLib\PasswordLib();
+            
+            $_SESSION['settings']['cpassman_dir'] = '..';
+            $passwordManager = new PasswordManager();
 
             // Connect to db and check user is granted
             $user_info = mysqli_fetch_array(
                 mysqli_query(
                     $db_link,
-                    "SELECT pw, admin FROM ".$pre."users
-                    WHERE login='".mysqli_escape_string($db_link, stripslashes($post_login))."'"
+                    'SELECT id, pw, admin FROM ' . $pre . "users
+                    WHERE login='" . mysqli_escape_string($db_link, stripslashes($post_login)) . "'"
                 )
             );
-
+            
             if (empty($user_info['pw']) || $user_info['pw'] === null) {
-                echo 'document.getElementById("but_next").disabled = "disabled";';
-                echo 'document.getElementById("res_step0").innerHTML = "This user is not allowed!";';
-                echo 'document.getElementById("user_granted").value = "0";';
-                $superGlobal->put("user_granted", false, "SESSION");
+                echo '[{'.
+                    '"error" : "User is not allowed",'.
+                    '"index" : ""'.
+                '}]';
+                $superGlobal->put('user_granted', false, 'SESSION');
             } else {
-                if ($pwdlib->verifyPasswordHash(Encryption\Crypt\aesctr::decrypt(base64_decode($post_pwd), "cpm", 128), $user_info['pw']) === true && $user_info['admin'] === "1") {
-                    echo 'document.getElementById("but_next").disabled = "";';
-                    echo 'document.getElementById("res_step0").innerHTML = "User is granted.";';
-                    echo 'document.getElementById("step").value = "1";';
-                    echo 'document.getElementById("user_granted").value = "1";';
-                    $superGlobal->put("user_granted", true, "SESSION");
+                if ($passwordManager->verifyPassword($user_info['pw'], Encryption\Crypt\aesctr::decrypt(base64_decode($post_pwd), 'cpm', 128)) === true && $user_info['admin'] === '1') {
+                    $superGlobal->put('user_granted', true, 'SESSION');
+                    $superGlobal->put('user_login', mysqli_escape_string($db_link, stripslashes($post_login)), 'SESSION');
+                    $superGlobal->put('user_password', Encryption\Crypt\aesctr::decrypt(base64_decode($post_pwd), 'cpm', 128), 'SESSION');
+                    $superGlobal->put('user_id', $user_info['id'], 'SESSION');
+                    echo '[{'.
+                        '"error" : "",'.
+                        '"index" : 1,'.
+                        '"info" : "' . base64_encode(json_encode(
+                            array(mysqli_escape_string($db_link, stripslashes($post_login)), $post_pwd, $user_info['id'])
+                        )) . '"'.
+                    '}]';
                 } else {
-                    echo 'document.getElementById("but_next").disabled = "disabled";';
-                    echo 'document.getElementById("res_step0").innerHTML = "This user is not allowed!";';
-                    echo 'document.getElementById("user_granted").value = "0";';
-                    $superGlobal->put("user_granted", false, "SESSION");
+                    $superGlobal->put('user_granted', false, 'SESSION');
+                    echo '[{'.
+                        '"error" : "User is not allowed",'.
+                        '"index" : ""'.
+                    '}]';
                 }
             }
 
-            echo 'document.getElementById("loader").style.display = "none";';
             break;
 
-        case "step1":
-            $session_user_granted = $superGlobal->get("user_granted", "SESSION");
+        case 'step1':
+            $session_user_granted = $superGlobal->get('user_granted', 'SESSION');
 
             if (intval($session_user_granted) !== 1) {
-                echo 'document.getElementById("res_step1").innerHTML = "User not connected anymore!";';
-                echo 'document.getElementById("loader").style.display = "none";';
+                echo '[{'.
+                    '"error" : "User not connected anymore",'.
+                    '"index" : ""'.
+                '}]';
                 break;
             }
 
             $abspath = str_replace('\\', '/', $post_abspath);
-            if (substr($abspath, strlen($abspath) - 1) == "/") {
+            if (substr($abspath, strlen($abspath) - 1) == '/') {
                 $abspath = substr($abspath, 0, strlen($abspath) - 1);
             }
             $okWritable = true;
             $okExtensions = true;
-            $txt = "";
+            $okTasksManager = true;
+            $okTUsersPasswordsSymfony = true;
+            $txt = '';
             $var_x = 1;
             $tab = array(
-                $abspath."/includes/config/settings.php",
-                $abspath."/includes/libraries/csrfp/libs/",
-                $abspath."/install/",
-                $abspath."/includes/",
-                $abspath."/includes/config/",
-                $abspath."/includes/avatars/",
-                $abspath."/files/",
-                $abspath."/upload/"
+                $abspath . '/includes/config/settings.php',
+                $abspath . '/includes/libraries/csrfp/libs/',
+                $abspath . '/install/',
+                $abspath . '/includes/',
+                $abspath . '/includes/config/',
+                $abspath . '/includes/avatars/',
+                $abspath . '/files/',
+                $abspath . '/upload/',
             );
             foreach ($tab as $elem) {
                 // try to create it if not existing
@@ -296,338 +374,299 @@ if (isset($post_type)) {
                 }
                 // check if writable
                 if (is_writable($elem)) {
-                    $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">'.
-                        $elem.'&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                    $txt .= '<span>' .
+                        $elem . '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
                 } else {
-                    $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">'.
-                        $elem.'&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                    $txt .= '<span>' .
+                        $elem . '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
                     $okWritable = false;
                 }
-                $var_x++;
+                ++$var_x;
             }
-            
+
             if (!extension_loaded('openssl')) {
                 //$okExtensions = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"openssl\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"openssl\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"openssl\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"openssl\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
             if (!extension_loaded('gd')) {
                 //$okExtensions = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"gd\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"gd\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"gd\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"gd\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
             if (!extension_loaded('mbstring')) {
                 //$okExtensions = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"mbstring\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"mbstring\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"mbstring\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"mbstring\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
             if (!extension_loaded('bcmath')) {
                 //$okExtensions = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"bcmath\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"bcmath\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"bcmath\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"bcmath\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
             if (!extension_loaded('iconv')) {
                 //$okExtensions = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"iconv\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"iconv\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"iconv\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"iconv\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
             if (!extension_loaded('xml')) {
                 //$okExtensions = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"xml\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"xml\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"xml\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"xml\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
             if (!extension_loaded('curl')) {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"curl\"'.
-                    '&nbsp;&nbsp;<img src=\"images/minus-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"curl\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP extension \"curl\"'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP extension \"curl\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
-            if (ini_get('max_execution_time') < 60) {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP \"Maximum '.
-                    'execution time\" is set to '.ini_get('max_execution_time').' seconds.'.
-                    ' Please try to set to 60s at least until Upgrade is finished.&nbsp;'.
+            if (!extension_loaded('gmp')) {
+                $txt .= '<span>PHP extension \"gmp\"' .
+                    '<i class=\"fa-solid fa-circle-minus text-danger ml-2\"></i></span><br />';
+            } else {
+                $txt .= '<span>PHP extension \"gmp\"' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
+            }
+            if (ini_get('max_execution_time') < 30) {
+                $txt .= '<span>PHP \"Maximum ' .
+                    'execution time\" is set to ' . ini_get('max_execution_time') . ' seconds.' .
+                    ' Please try to set to 60s at least until Upgrade is finished.&nbsp;' .
                     '&nbsp;<img src=\"images/minus-circle.png\"></span> <br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP \"Maximum '.
-                    'execution time\" is set to '.ini_get('max_execution_time').' seconds'.
-                    '&nbsp;&nbsp;<img src=\"images/tick-circle.png\"></span><br />';
+                $txt .= '<span>PHP \"Maximum ' .
+                    'execution time\" is set to ' . ini_get('max_execution_time') . ' seconds' .
+                    '<i class=\"fa-solid fa-circle-check text-success ml-2\"></i></span><br />';
             }
-            if (version_compare(phpversion(), '5.5.0', '<')) {
-                $okVersion = false;
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP version '.
-                    phpversion().' is not OK (minimum is 5.5.0) &nbsp;&nbsp;'.
+            if (version_compare(phpversion(), MIN_PHP_VERSION, '<')) {
+                $txt .= '<span>PHP version ' .
+                    phpversion() . ' is not OK (minimum is '.MIN_PHP_VERSION.') &nbsp;&nbsp;' .
                     '<img src=\"images/minus-circle.png\"></span><br />';
             } else {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">PHP version '.
-                    phpversion().' is OK&nbsp;&nbsp;<img src=\"images/tick-circle.png\">'.
+                $txt .= '<span>PHP version ' .
+                    phpversion() . ' is OK<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
                     '</span><br />';
             }
-
-            //get infos from SETTINGS.PHP file
-            $filename = "../includes/config/settings.php";
-            $events = "";
-            if (file_exists($filename)) {
-                //copy some constants from this existing file
-                $settingsFile = file($filename);
-                foreach ($settingsFile as $key => $val) {
-                    if (substr_count($val, 'charset') > 0) {
-                        $superGlobal->put("charset", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '@define(') > 0 && substr_count($val, 'SALT') > 0) {
-                        $superGlobal->put("encrypt_key", substr($val, 17, strpos($val, "')") - 17), "SESSION");
-                    } elseif (substr_count($val, '$smtp_server') > 0) {
-                        $superGlobal->put("smtp_server", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$smtp_auth') > 0) {
-                        $superGlobal->put("smtp_auth", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$smtp_auth_username') > 0) {
-                        $superGlobal->put("smtp_auth_username", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$smtp_auth_password') > 0) {
-                        $superGlobal->put("smtp_auth_password", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$smtp_port') > 0) {
-                        $superGlobal->put("smtp_port", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$smtp_security') > 0) {
-                        $superGlobal->put("smtp_security", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$email_from') > 0) {
-                        $superGlobal->put("email_from", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$email_from_name') > 0) {
-                        $superGlobal->put("email_from_name", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$server') > 0) {
-                        $superGlobal->put("server", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$user') > 0) {
-                        $superGlobal->put("user", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$pass') > 0) {
-                        $superGlobal->put("pass", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$port') > 0) {
-                        $superGlobal->put("port", getSettingValue($val), "SESSION");
-                    } elseif (substr_count($val, '$database') > 0) {
-                        $database = getSettingValue($val);
-                    } elseif (substr_count($val, '$pre') > 0) {
-                        $pre = getSettingValue($val);
-                    } elseif (substr_count($val, "define('SECUREPATH',") > 0) {
-                        $superGlobal->put("sk_file", substr($val, 23, strpos($val, ');') - 24)."/sk.php", "SESSION");
-                    }
-                }
-            }
-            $session_sk_file = $superGlobal->get("sk_file", "SESSION");
-            if (isset($session_sk_file) && !empty($session_sk_file)
-                && file_exists($session_sk_file)
-            ) {
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">sk.php file'.
-                    ' found in \"'.addslashes($session_sk_file).'\"&nbsp;&nbsp;<img src=\"images/tick-circle.png\">'.
-                    '</span><br />';
-                //copy some constants from this existing file
-                $skFile = file($session_sk_file);
-                foreach ($skFile as $key => $val) {
-                    if (substr_count($val, "@define('SALT'") > 0) {
-                        $superGlobal->put("encrypt_key", substr($val, 17, strpos($val, "')") - 17), "SESSION");
-                        $session_encrypt_key = $superGlobal->get("encrypt_key", "SESSION");
-                        echo '$("#session_salt").val("'.$session_encrypt_key.'");';
-                    }
-                }
-            }
-
-            // check if 2.1.27 already installed
-            $okEncryptKey = false;
-            $defuse_file = substr($session_sk_file, 0, strrpos($session_sk_file, "/"))."/teampass-seckey.txt";
-            if (file_exists($defuse_file)) {
-                $okEncryptKey = true;
-                $superGlobal->put("tp_defuse_installed", true, "SESSION");
-                $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">Defuse encryption key is defined&nbsp;&nbsp;<img src=\"images/tick-circle.png\">'.
-                    '</span><br />';
-            }
-
-            if ($okEncryptKey === false) {
-                if (!isset($session_encrypt_key) || empty($session_encrypt_key)) {
-                    $superGlobal->put("tp_defuse_installed", false, "SESSION");
-                    $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">Encryption Key (SALT) '.
-                        ' could not be recovered &nbsp;&nbsp;'.
+            $mysqlVersion = version_compare((string) $db_link -> server_version, MIN_MYSQL_VERSION, '<') ;
+            $mariadbVersion = version_compare((string) $db_link -> server_version, MIN_MARIADB_VERSION, '<') ;
+            if ($mysqlVersion && $mariadbVersion) {
+                if ($mariadbVersion === '') {
+                    $txt .= '<span>MySQL version ' .
+                        $db_link -> server_version . ' is not OK (minimum is '.MIN_MYSQL_VERSION.') &nbsp;&nbsp;' .
                         '<img src=\"images/minus-circle.png\"></span><br />';
                 } else {
-                    $okEncryptKey = true;
-                    $txt .= '<span style=\"padding-left:30px;font-size:13pt;\">Encryption Key (SALT) is available&nbsp;&nbsp;<img src=\"images/tick-circle.png\">'.
+                    $txt .= '<span>MySQL version ' .
+                        $db_link -> server_version . ' is not OK (minimum is '.MIN_MARIADB_VERSION.') &nbsp;&nbsp;' .
+                        '<img src=\"images/minus-circle.png\"></span><br />';
+                }
+            } else {
+                if ($mariadbVersion === '') {
+                    $txt .= '<span>MySQL version ' .
+                        $db_link -> server_info . ' is OK<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
+                        '</span><br />';
+                } else {
+                    $txt .= '<span>MySQL version ' .
+                        $db_link -> server_info . ' is OK<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
                         '</span><br />';
                 }
+                
+            }
+            
+
+            // check if 2.1.27 already installed
+            // Test non necessaire si on a deja fait l'upgrade
+            if (defined(SECUREPATH) === true) {
+                // Check if we are in version 3
+                if (@mysqli_fetch_row(
+                    mysqli_query(
+                        $db_link,
+                        'SELECT valeur FROM ' . $pre . "misc
+                        WHERE type='admin' AND intitule = 'enable_tasks_manager'"
+                    )
+                )) {
+                    $okEncryptKey = true;
+                } else {
+                    // We are not in version 3
+                    $okEncryptKey = false;
+                    $defuse_file = SECUREPATH . '/teampass-seckey.txt';
+                    if (file_exists($defuse_file)) {
+                        $okEncryptKey = true;
+                        $superGlobal->put('tp_defuse_installed', true, 'SESSION');
+                        $txt .= '<span>Defuse encryption key is defined<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
+                            '</span><br />';
+                    }
+
+                    if ($okEncryptKey === false) {
+                        $superGlobal->put('tp_defuse_installed', false, 'SESSION');
+                        $txt .= '<span>Encryption Key (SALT) ' .
+                            ' could not be recovered from ' . $defuse_file . '&nbsp;&nbsp;' .
+                            '<img src=\"images/minus-circle.png\"></span><br />';
+                            $okEncryptKey = false;
+                    } else {
+                        $okEncryptKey = true;
+                        $txt .= '<span>Encryption Key (SALT) is available<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
+                            '</span><br />';
+                    }
+                }                
+                
+            } else {
+                $okEncryptKey = true;
             }
 
             if ($okWritable === true && $okExtensions === true && $okEncryptKey === true) {
-                echo 'document.getElementById("but_next").disabled = "";';
-                echo 'document.getElementById("res_step1").innerHTML = "Elements are OK.";';
+                $error = "";
+                $nextStep = 2;
             } else {
-                echo 'document.getElementById("but_next").disabled = "disabled";';
-                echo 'document.getElementById("res_step1").innerHTML = "Correct the shown '.
-                    'errors and click on button Launch to refresh";';
+                $error = "Something went wrong. Please check messages.";
+                $nextStep = 1;
             }
 
-            echo 'document.getElementById("res_step1").innerHTML = "'.$txt.'";';
-            echo 'document.getElementById("loader").style.display = "none";';
+            // Is tasks manager empty?
+            $tableProcessesExists = mysqli_query(
+                $db_link,
+                "SELECT * FROM information_schema.tables
+                WHERE table_schema = '$database'
+                AND table_name = '" . $pre . "processes'"
+            );
+            if ($tableProcessesExists === true) {
+                @mysqli_query(
+                    $db_link,
+                    "SELECT * FROM `" . $pre . "processes`
+                    WHERE finished_at = ''"
+                );
+                if (@mysqli_affected_rows($db_link) > 0) {
+                    $txt .= '<span>Tasks manager is not empty. Please empty it before starting next step.&nbsp;&nbsp;' .
+                            '<img src=\"images/minus-circle.png\"></span><br />';
+                    $okTasksManager = false;
+                } else {
+                    $okTasksManager = true;
+                    $txt .= '<span>Tasks manager is empty<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
+                        '</span><br />';
+                }
+            } else {
+                $okTasksManager = true;
+                $txt .= '<span>Tasks manager is empty<i class=\"fa-solid fa-circle-check text-success ml-2\"></i>' .
+                        '</span><br />';
+            }
+
+            // are users passwords encrypted with new Symfony library?
+            @mysqli_query(
+                $db_link,
+                "SELECT * FROM `" . $pre . "users`
+                WHERE pw LIKE '$2y$10$%'"
+            );
+            if (@mysqli_affected_rows($db_link) > 0) {
+                $txt .= '<span>Users password not encrypted with new library. Is a blocker to upgrade to 3.2.0' .
+                '&nbsp;<a target=\"_blank\" href=\"https://github.com/nilsteampassnet/TeamPass/discussions/4020\">[Read more]</a>'.
+                '&nbsp;&nbsp;<i class=\"fa-solid fa-triangle-exclamation text-warning ml-2\"></i>'.
+                '</span><br />';
+                if (TP_VERSION === '3.2.0') $okTUsersPasswordsSymfony = false;
+            }
+
+            if ($okWritable === true && $okExtensions === true && $okEncryptKey === true && $okTasksManager === true && $okTUsersPasswordsSymfony === true) {
+                $error = "";
+                $nextStep = 2;
+            } else {
+                $error = "Something went wrong. Please check messages.";
+                $nextStep = 1;
+            }
+
+            echo '[{'.
+                '"error" : "' . $error . '",'.
+                '"info" : "' . $txt . '",'.
+                '"index" : "'.($error === "" ? "" : $nextStep).'",'.
+                '"infos" : "' . $okWritable." ; ".$okExtensions." ; ".$okEncryptKey." ; ".$okTasksManager." ; " . '"'.
+            '}]';
             break;
 
-            #==========================
-        case "step2":
-            $res = "";
-            $session_user_granted = $superGlobal->get("user_granted", "SESSION");
+            //==========================
+        case 'step2':
+            $res = '';
+            $session_user_granted = $superGlobal->get('user_granted', 'SESSION');
 
-            if ($session_user_granted !== "1") {
-                echo 'document.getElementById("res_step2").innerHTML = "User not connected anymore!";';
-                echo 'document.getElementById("loader").style.display = "none";';
+            if ($session_user_granted !== '1') {
+                echo '[{'.
+                    '"error" : "User not connected anymore",'.
+                    '"index" : ""'.
+                '}]';
                 break;
             }
             //decrypt the password
             // AES Counter Mode implementation
             require_once 'libs/aesctr.php';
 
-            // check in db if previous saltk exists
-            if ($post_no_previous_sk === "false" || $post_no_previous_sk === "previous_sk_sel") {
-                $db_sk = mysqli_fetch_row(mysqli_query($db_link, "SELECT count(*) FROM ".$pre."misc
-                WHERE type='admin' AND intitule = 'saltkey_ante_2127'"));
-                if (!empty($post_previous_sk) || !empty($post_session_salt)) {
-                    // get sk
-                    if (!empty($post_session_salt)) {
-                        $sk_val = filter_var($post_session_salt, FILTER_SANITIZE_STRING);
-                    } else {
-                        $sk_val = filter_var($post_previous_sk, FILTER_SANITIZE_STRING);
-                    }
-
-                    // Update
-                    if (!empty($db_sk[0])) {
-                        mysqli_query(
-                            $db_link,
-                            "UPDATE `".$pre."misc`
-                            SET `valeur` = '".$sk_val."'
-                            WHERE type = 'admin' AND intitule = 'saltkey_ante_2127'"
-                        );
-                    } else {
-                        mysqli_query(
-                            $db_link,
-                            "INSERT INTO `".$pre."misc`
-                            (`valeur`, `type`, `intitule`)
-                            VALUES ('".$sk_val."', 'admin', 'saltkey_ante_2127')"
-                        );
-                    }
-                } elseif (empty($db_sk[0])) {
-                    $res = "Please provide Teampass instance history.";
-                    echo 'document.getElementById("but_next").disabled = "disabled";';
-                    echo 'document.getElementById("res_step2").innerHTML = "'.$res.'";';
-                    echo 'document.getElementById("loader").style.display = "none";';
-                    echo 'document.getElementById("no_encrypt_key").style.display = "";';
-                }
-            } else {
-                // user said that database has not being used for an older version
-                // no old sk is available
-                    $tmp = mysqli_num_rows(mysqli_query(
-                        $db_link,
-                        "SELECT * FROM `".$pre."misc`
-                        WHERE type = 'admin' AND intitule = 'saltkey_ante_2127'"
-                    ));
-                if ($tmp == 0) {
-                    mysqli_query(
-                        $db_link,
-                        "INSERT INTO `".$pre."misc`
-                        (`valeur`, `type`, `intitule`)
-                        VALUES ('none', 'admin', 'saltkey_ante_2127')"
-                    );
-                } else {
-                    mysqli_query(
-                        $db_link,
-                        "INSERT INTO `".$pre."misc`
-                        (`valeur`, `type`, `intitule`)
-                        VALUES ('none', 'admin', 'saltkey_ante_2127')"
-                    );
-                }
-                $superGlobal->put("tp_defuse_installed", true, "SESSION");
-            }
-
-            //What CPM version
-            if (mysqli_query(
-                $db_link,
-                "SELECT valeur FROM ".$pre."misc
-                WHERE type='admin' AND intitule = 'cpassman_version'"
-            )) {
-                $tmpResult = mysqli_query(
-                    $db_link,
-                    "SELECT valeur FROM ".$pre."misc
-                    WHERE type='admin' AND intitule = 'cpassman_version'"
-                );
-                $cpmVersion = mysqli_fetch_row($tmpResult);
-                echo 'document.getElementById("actual_cpm_version").value = "'.
-                    $cpmVersion[0].'";';
-            } else {
-                echo 'document.getElementById("actual_cpm_version").value = "0";';
-            }
-
             //Get some infos from DB
+            $cpmIsUTF8[0] = 0;
             if (@mysqli_fetch_row(
                 mysqli_query(
                     $db_link,
-                    "SELECT valeur FROM ".$pre."misc
+                    'SELECT valeur FROM ' . $pre . "misc
                     WHERE type='admin' AND intitule = 'utf8_enabled'"
                 )
-            )
-            ) {
+            )) {
                 $cpmIsUTF8 = mysqli_fetch_row(
                     mysqli_query(
                         $db_link,
-                        "SELECT valeur FROM ".$pre."misc
+                        'SELECT valeur FROM ' . $pre . "misc
                         WHERE type='admin' AND intitule = 'utf8_enabled'"
                     )
                 );
-                echo 'document.getElementById("cpm_isUTF8").value = "'.$cpmIsUTF8[0].'";';
-                $superGlobal->put("utf8_enabled", $cpmIsUTF8[0], "SESSION");
-            } else {
-                echo 'document.getElementById("cpm_isUTF8").value = "0";';
-                $superGlobal->put("utf8_enabled", 0, "SESSION");
             }
+            $superGlobal->put('utf8_enabled', $cpmIsUTF8[0], 'SESSION');
 
             // put TP in maintenance mode or not
             @mysqli_query(
                 $db_link,
-                "UPDATE `".$pre."misc`
+                "UPDATE `" . $pre . "misc`
                 SET `valeur` = 'maintenance_mode'
-                WHERE type = 'admin' AND intitule = '".$post_no_maintenance_mode."'"
+                WHERE type = 'admin' AND intitule = '" . $post_no_maintenance_mode . "'"
             );
 
-            echo 'document.getElementById("dump").style.display = "";';
-
-
-            echo 'document.getElementById("res_step2").innerHTML = "'.$res.'";';
-            echo 'document.getElementById("loader").style.display = "none";';
+            echo '[{'.
+                '"error" : "",'.
+                '"index" : "",'.
+                '"info" : "'.$res.'",'.
+                '"isUtf8" : "'.$cpmIsUTF8[0].'"'.
+            '}]';
             break;
 
-            #==========================
-        case "step3":
-            $session_user_granted = $superGlobal->get("user_granted", "SESSION");
+            //==========================
+        case 'step3':
+            $session_user_granted = $superGlobal->get('user_granted', 'SESSION');
 
-            if ($session_user_granted !== "1") {
-                echo 'document.getElementById("res_step3").innerHTML = "User not connected anymore!";';
-                echo 'document.getElementById("loader").style.display = "none";';
+            if ($session_user_granted !== '1') {
+                echo '[{'.
+                    '"error" : "User not connected anymore",'.
+                    '"index" : ""'.
+                '}]';
                 break;
             }
 
             //rename tables
-            if (isset($post_prefix_before_convert) && $post_prefix_before_convert == "true") {
+            if (isset($post_prefix_before_convert) && $post_prefix_before_convert == 'true') {
                 $tables = mysqli_query($db_link, 'SHOW TABLES');
                 while ($table = mysqli_fetch_row($tables)) {
-                    if (tableExists("old_".$table[0]) != 1 && substr($table[0], 0, 4) != "old_") {
-                        mysqli_query($db_link, "CREATE TABLE old_".$table[0]." LIKE ".$table[0]);
-                        mysqli_query($db_link, "INSERT INTO old_".$table[0]." SELECT * FROM ".$table[0]);
+                    if (tableExists('old_' . $table[0]) != 1 && substr($table[0], 0, 4) != 'old_') {
+                        mysqli_query($db_link, 'CREATE TABLE old_' . $table[0] . ' LIKE ' . $table[0]);
+                        mysqli_query($db_link, 'INSERT INTO old_' . $table[0] . ' SELECT * FROM ' . $table[0]);
                     }
                 }
             }
@@ -635,315 +674,551 @@ if (isset($post_type)) {
             //convert database
             mysqli_query(
                 $db_link,
-                "ALTER DATABASE `".$database."`
-                DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci"
+                'ALTER DATABASE `' . $database . '`
+                DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci'
             );
 
             //convert tables
-            $res = mysqli_query($db_link, "SHOW TABLES FROM `".$database."`");
+            $res = mysqli_query($db_link, 'SHOW TABLES FROM `' . $database . '`');
             while ($table = mysqli_fetch_row($res)) {
-                if (substr($table[0], 0, 4) != "old_") {
+                if (substr($table[0], 0, 4) != 'old_') {
                     mysqli_query(
                         $db_link,
-                        "ALTER TABLE ".$database.".`{$table[0]}`
-                        CONVERT TO CHARACTER SET utf8 COLLATE utf8_general_ci"
+                        'ALTER TABLE ' . $database . '.`{$table[0]}`
+                        CONVERT TO CHARACTER SET utf8 COLLATE utf8_general_ci'
                     );
                     mysqli_query(
                         $db_link,
-                        "ALTER TABLE".$database.".`{$table[0]}`
-                        DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci"
+                        'ALTER TABLE' . $database . '.`{$table[0]}`
+                        DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci'
                     );
                 }
             }
 
-            echo 'document.getElementById("res_step3").innerHTML = "Done!";';
-            echo 'document.getElementById("loader").style.display = "none";';
-            echo 'document.getElementById("but_next").disabled = "";';
-            echo 'document.getElementById("but_launch").disabled = "disabled";';
+            echo '[{'.
+                '"error" : "",'.
+                '"index" : ""'.
+            '}]';
 
             mysqli_close($db_link);
             break;
 
-            #==========================
-
+            //==========================
 
             //=============================
-        case "step5":
-            $session_user_granted = $superGlobal->get("user_granted", "SESSION");
+        case 'step5':
+            $session_user_granted = $superGlobal->get('user_granted', 'SESSION');
 
-            if ($session_user_granted !== "1") {
-                echo 'document.getElementById("res_step5").innerHTML = "User not connected anymore!";';
-                echo 'document.getElementById("loader").style.display = "none";';
+            if (intVal($session_user_granted) !== 1) {
+                echo '[{'.
+                    '"error" : "User not connected anymore",'.
+                    '"index" : ""'.
+                '}]';
                 break;
             }
 
-            $filename = "../includes/config/settings.php";
-            $events = "";
-            if (file_exists($filename)) {
+            $returnStatus = array();
+            // If settings.php file doesn't contain DB_HOST then regenerate it
+            $settingsFile = '../includes/config/settings.php';
+            include_once $settingsFile;
+
+            if (defined('DB_SSL') === false) {
                 //Do a copy of the existing file
                 if (!copy(
-                    $filename,
-                    $filename.'.'.date(
-                        "Y_m_d",
-                        mktime(0, 0, 0, (int) date('m'), (int) date('d'), (int) date('y'))
+                    $settingsFile,
+                    $settingsFile . '.' . date(
+                        'Y_m_d_H_i_s',
+                        mktime((int) date('H'), (int) date('i'), (int) date('s'), (int) date('m'), (int) date('d'), (int) date('y'))
                     )
                 )) {
-                    echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"Setting.php file already exists and cannot be renamed. '.
-                        'Please do it by yourself and click on button Launch.";';
-                    echo 'document.getElementById("loader").style.display = "none";';
+                    echo '[{'.
+                        '"error" : "Setting.php file already exists and cannot be renamed. Please do it by yourself and click on button Launch",'.
+                        '"index" : ""'.
+                    '}]';
                     break;
                 } else {
-                    $events .= "The file $filename already exist. A copy has been created.<br />";
-                    unlink($filename);
+                    unlink($settingsFile);
                 }
 
-                //manage SK path
-                if (isset($post_sk_path) && !empty($post_sk_path)) {
-                    $skFile = str_replace('\\', '/', $post_sk_path.'/sk.php');
-                    $securePath = str_replace('\\', '/', $post_sk_path);
-                } else {
-                    echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"<img src=\"images/exclamation-red.png\"> The SK path must be indicated.";
-                        document.getElementById("loader").style.display = "none";';
-                    break;
-                }
+                // CHeck if old sk.php exists.
+                // If yes then get keys to database and delete it
+                if (empty($post_sk_path) === false || defined('SECUREPATH') === true) {
+                    $filename = (empty($post_sk_path) === false ? $post_sk_path : SECUREPATH) . '/sk.php';
+                    if (file_exists($filename)) {
+                        include_once $filename;
+                        unlink($filename);
 
-                //Check if path is ok
-                if (is_dir($securePath)) {
-                    if (is_writable($securePath)) {
-                        //Do nothing
-                    } else {
-                        echo 'document.getElementById("res_step5").innerHTML = '.
-                            '"<img src=\"images/exclamation-red.png\"> The SK path must be writable!";
-                            document.getElementById("loader").style.display = "none";';
-                        break;
+                        $filesecure = generateRandomKey();
+                        define('SECUREFILE', $filesecure);
+
+                        // Using the new Duo Web SDK akey is deprecated, not keeping track of it.
+                        // SKEY
+                        $tmp = mysqli_query(
+                            $db_link,
+                            "SELECT INTO `" . $pre . "misc`
+                            WHERE type = 'admin' AND intitule = 'duo_skey'"
+                        );
+                        if ($tmp) {
+                            mysqli_query(
+                                $db_link,
+                                "UPDATE `" . $pre . "misc`
+                                set valeur = '" . SKEY . "', type = 'admin', intitule = 'duo_skey'"
+                            );
+                        } else {
+                            mysqli_query(
+                                $db_link,
+                                "INSERT INTO `" . $pre . "misc`
+                                (`valeur`, `type`, `intitule`)
+                                VALUES ('" . SKEY . "', 'admin', 'duo_skey')"
+                            );
+                        }
+
+                        // IKEY
+                        $tmp = mysqli_query(
+                            $db_link,
+                            "SELECT INTO `" . $pre . "misc`
+                            WHERE type = 'admin' AND intitule = 'duo_ikey'"
+                        );
+                        if ($tmp) {
+                            mysqli_query(
+                                $db_link,
+                                "UPDATE `" . $pre . "misc`
+                                set valeur = '" . IKEY . "', type = 'admin', intitule = 'duo_ikey'"
+                            );
+                        } else {
+                            mysqli_query(
+                                $db_link,
+                                "INSERT INTO `" . $pre . "misc`
+                                (`valeur`, `type`, `intitule`)
+                                VALUES ('" . IKEY . "', 'admin', 'duo_ikey')"
+                            );
+                        }
+
+                        // HOST
+                        $tmp = mysqli_query(
+                            $db_link,
+                            "SELECT INTO `" . $pre . "misc`
+                            WHERE type = 'admin' AND intitule = 'duo_host'"
+                        );
+                        if ($tmp) {
+                            mysqli_query(
+                                $db_link,
+                                "UPDATE `" . $pre . "misc`
+                                set valeur = '" . HOST . "', type = 'admin', intitule = 'duo_host'"
+                            );
+                        } else {
+                            mysqli_query(
+                                $db_link,
+                                "INSERT INTO `" . $pre . "misc`
+                                (`valeur`, `type`, `intitule`)
+                                VALUES ('" . HOST . "', 'admin', 'duo_host')"
+                            );
+                        }
                     }
-                } else {
-                    echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"<img src=\"images/exclamation-red.png\"> '.
-                        'Path for SK is not a Directory!";
-                    document.getElementById("loader").style.display = "none";';
-                    break;
                 }
 
-                $file_handled = fopen($filename, 'w');
-
-                //prepare smtp_auth variable
-                if (empty($superGlobal->get("smtp_auth", "SESSION"))) {
-                    $superGlobal->put("smtp_auth", "false", "SESSION");
-                }
-                if (empty($superGlobal->get("smtp_auth_username", "SESSION"))) {
-                    $superGlobal->put("smtp_auth_username", "false", "SESSION");
-                }
-                if (empty($superGlobal->get("smtp_auth_password", "SESSION"))) {
-                    $superGlobal->put("smtp_auth_password", "false", "SESSION");
-                }
-                if (empty($superGlobal->get("email_from_name", "SESSION"))) {
-                    $superGlobal->put("email_from_name", "false", "SESSION");
+                // Ensure DB is read as UTF8
+                if (DB_ENCODING === "") {
+                    define('DB_ENCODING', "utf8");
                 }
 
-                $result1 = fwrite(
+                // Now create new file
+                $file_handled = fopen($settingsFile, 'w');
+
+                $fileCreation = fwrite(
                     $file_handled,
                     utf8_encode(
-                        "<?php
-global \$lang, \$txt, \$pathTeampas, \$urlTeampass, \$pwComplexity, \$mngPages;
-global \$server, \$user, \$pass, \$database, \$pre, \$db, \$port, \$encoding;
+                        '<?php
+    // DATABASE connexion parameters
+    define("DB_HOST", "' . DB_HOST . '");
+    define("DB_USER", "' . DB_USER . '");
+    define("DB_PASSWD", "' . defuse_return_decrypted(DB_PASSWD) . '");
+    define("DB_NAME", "' . DB_NAME . '");
+    define("DB_PREFIX", "' . DB_PREFIX . '");
+    define("DB_PORT", "' . DB_PORT . '");
+    define("DB_ENCODING", "' . DB_ENCODING . '");
+    define("DB_SSL", false); // if DB over SSL then comment this line
+    // if DB over SSL then uncomment the following lines
+    //define("DB_SSL", array(
+    //    "key" => "",
+    //    "cert" => "",
+    //    "ca_cert" => "",
+    //    "ca_path" => "",
+    //    "cipher" => ""
+    //));
+    define("DB_CONNECT_OPTIONS", array(
+        MYSQLI_OPT_CONNECT_TIMEOUT => 10
+    ));
+    define("SECUREPATH", "' . SECUREPATH. '");
 
-### DATABASE connexion parameters ###
-\$server = \"".$server."\";
-\$user = \"".$user."\";
-\$pass = \"".cryption($pass, "", "encrypt")['string']."\";
-\$database = \"".$database."\";
-\$port = ".$port.";
-\$pre = \"".$pre."\";
-\$encoding = \"".$encoding."\";
-
-@date_default_timezone_set(\$_SESSION['settings']['timezone']);
-@define('SECUREPATH', '".substr($skFile, 0, strlen($skFile) - 7)."');
-if (file_exists(\"".$skFile."\")) {
-    require_once \"".$skFile."\";
-}
-@define('COST', '13'); // Don't change this.
-"
+    if (isset($_SESSION[\'settings\'][\'timezone\']) === true) {
+    date_default_timezone_set($_SESSION[\'settings\'][\'timezone\']);
+    }
+    '
                     )
                 );
 
                 fclose($file_handled);
-                if ($result1 === false) {
-                    echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"Setting.php file could not be created. '.
-                        'Please check the path and the rights.";';
-                } else {
-                    echo 'document.getElementById("step5_settingFile").innerHTML = '.
-                        '"<img src=\"images/tick.png\">";';
-                }
-
-                //Create sk.php file
-                if (file_exists($skFile) === false) {
-                    $file_handled = fopen($skFile, 'w');
-
-                    $result2 = fwrite(
-                        $file_handled,
-                        utf8_encode(
-                            "<?php
-@define('COST', '13'); // Don't change this.
-@define('AKEY', '');
-@define('IKEY', '');
-@define('SKEY', '');
-@define('HOST', '');
-?>"
+                if ($fileCreation === false) {
+                    array_push(
+                        $returnStatus, 
+                        array(
+                            'id' => 'step5_settingFile', 
+                            'html' => '<i class="far fa-times-circle fa-lg text-danger ml-2 mr-2"></i><span class="text-info font-italic">Setting.php file could not be created in /includes/config/ folder. Please check the path and the rights.</span>',
                         )
                     );
-                    fclose($file_handled);
+                } else {
+                    array_push(
+                        $returnStatus, 
+                        array(
+                            'id' => 'step5_settingFile', 
+                            'html' => '<i class="fa-solid fa-circle-check fa-lg text-success ml-2"></i>',
+                        )
+                    );
                 }
+                // reload the file
+                include '../includes/config/settings.php';
 
+                // ensure the new constant is set
+                define("DB_SSL", false);
+                define("DB_CONNECT_OPTIONS", array(
+                    MYSQLI_OPT_CONNECT_TIMEOUT => 10
+                ));
+            }
+
+            // Manage saltkey.txt file
+            if (empty($post_sk_path) === false || defined('SECUREPATH') === true) {
+                array_push(
+                    $returnStatus, 
+                    array(
+                        'id' => 'step5_saltkeyFile', 
+                        'html' => '<i class="fa-solid fa-circle-check fa-lg text-success ml-2 mr-2"></i><span class="text-info font-italic">Nothing done</span>',
+                    )
+                );
+            } else {
+                array_push(
+                    $returnStatus, 
+                    array(
+                        'id' => 'step5_saltkeyFile', 
+                        'html' => '<i class="fa-solid fa-circle-check fa-lg text-success ml-2 mr-2"></i><span class="text-info font-italic">Nothing done</span>',
+                    )
+                );
+            }
+
+            // Do csrfp.config.php file
+            $csrfp_file_sample = '../includes/libraries/csrfp/libs/csrfp.config.sample.php';
+            if (file_exists($csrfp_file_sample) === true) {
                 // update CSRFP TOKEN
-                $csrfp_file_sample = "../includes/libraries/csrfp/libs/csrfp.config.sample.php";
-                $csrfp_file = "../includes/libraries/csrfp/libs/csrfp.config.php";
+                $csrfp_file = '../includes/libraries/csrfp/libs/csrfp.config.php';
                 if (file_exists($csrfp_file) === true) {
-                    if (!copy($filename, $filename.'.'.date("Y_m_d", mktime(0, 0, 0, (int) date('m'), (int) date('d'), (int) date('y'))).'.'.time())) {
-                        echo '[{"error" : "csrfp.config.php file already exists and cannot be renamed. Please do it by yourself and click on button Launch.", "result":"", "index" : "'.$post_index.'", "multiple" : "'.$post_multiple.'"}]';
+                    if (
+                        copy(
+                            $csrfp_file,
+                            $csrfp_file . '.' . date(
+                                'Y_m_d_H_i_s',
+                                mktime((int) date('H'), (int) date('i'), (int) date('s'), (int) date('m'), (int) date('d'), (int) date('y'))
+                            )
+                        ) === false
+                    ) {
+                        array_push(
+                            $returnStatus, 
+                            array(
+                                'id' => 'step5_csrfpFile', 
+                                'html' => '<i class="fas fa-times-circle fa-lg text-danger ml-2 mr-2"></i><span class="text-info font-italic">The file could not be renamed. Please rename it by yourself and restart operation.</span>',
+                            )
+                        );
                         break;
-                    } else {
-                        $events .= "The file $csrfp_file already exist. A copy has been created.<br />";
                     }
                 }
                 unlink($csrfp_file); // delete existing csrfp.config file
                 copy($csrfp_file_sample, $csrfp_file); // make a copy of csrfp.config.sample file
-                $data = file_get_contents("../includes/libraries/csrfp/libs/csrfp.config.php");
-                $newdata = str_replace('"CSRFP_TOKEN" => ""', '"CSRFP_TOKEN" => "'.bin2hex(openssl_random_pseudo_bytes(25)).'"', $data);
+                $data = file_get_contents('../includes/libraries/csrfp/libs/csrfp.config.php');
+                $newdata = str_replace('"CSRFP_TOKEN" => ""', '"CSRFP_TOKEN" => "' . bin2hex(openssl_random_pseudo_bytes(25)) . '"', $data);
                 $newdata = str_replace('"tokenLength" => "25"', '"tokenLength" => "50"', $newdata);
-                $jsUrl = $post_url_path.'/includes/libraries/csrfp/js/csrfprotector.js';
-                $newdata = str_replace('"jsUrl" => ""', '"jsUrl" => "'.$jsUrl.'"', $newdata);
+                $jsUrl = $post_url_path . '/includes/libraries/csrfp/js/csrfprotector.js';
+                $newdata = str_replace('"jsUrl" => ""', '"jsUrl" => "' . $jsUrl . '"', $newdata);
                 $newdata = str_replace('"verifyGetFor" => array()', '"verifyGetFor" => array("*page=items&type=duo_check*")', $newdata);
-                file_put_contents("../includes/libraries/csrfp/libs/csrfp.config.php", $newdata);
-
-
-                // finalize
-                if (isset($result2) && $result2 === false) {
-                    echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"$skFile could not be created. Please check the path and the rights.";';
-                } else {
-                    echo 'document.getElementById("step5_skFile").innerHTML = '.
-                        '"<img src=\"images/tick.png\">";';
-                }
+                file_put_contents('../includes/libraries/csrfp/libs/csrfp.config.php', $newdata);
 
                 // Mark a tag to force Install stuff (folders, files and table) to be cleanup while first login
                 mysqli_query(
                     $db_link,
-                    "INSERT INTO `".$pre."misc` (`type`, `intitule`, `valeur`) VALUES ('install', 'clear_install_folder', 'true')"
+                    'INSERT INTO `' . $pre . 'misc` (`type`, `intitule`, `valeur`) VALUES ("install", "clear_install_folder", "true")'
                 );
 
+                array_push(
+                    $returnStatus, 
+                    array(
+                        'id' => 'step5_csrfpFile', 
+                        'html' => '<i class="fa-solid fa-circle-check fa-lg text-success ml-2 mr-2"></i><span class="text-info font-italic">Nothing done</span>',
+                    )
+                );
+            } else {
+                array_push(
+                    $returnStatus, 
+                    array(
+                        'id' => 'step5_csrfpFile', 
+                        'html' => '<i class=\"fa-solid fa-circle-check fa-lg text-success ml-2 mr-2\"></i><span class=\"text-info font-italic\">Nothing done</span>',
+                    )
+                );
+            }
 
-                //Finished
-                if ($result1 !== false
-                    && (!isset($result2) || (isset($result2) && $result2 !== false))
-                ) {
-                    echo 'document.getElementById("but_next").disabled = "";';
-                    echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"Operations are successfully completed.";';
-                    echo 'document.getElementById("loader").style.display = "none";';
-                    echo 'document.getElementById("but_launch").disabled = "disabled";';
+            // update with correct version
+            // 1st - check if teampass_version exists
+            $data = mysqli_fetch_row(mysqli_query($db_link, "SELECT COUNT(*) FROM ".$pre . "misc WHERE type = 'admin' AND intitule = 'teampass_version';"));
+            if ((int) $data[0] === 0) {
+                // change variable name and put version
+                mysqli_query(
+                    $db_link,
+                    "UPDATE `" . $pre . "misc`
+                    SET `valeur` = '".TP_VERSION."', `intitule` = 'teampass_version'
+                    WHERE intitule = 'cpassman_version' AND type = 'admin';"
+                );
+            } else {
+                mysqli_query(
+                    $db_link,
+                    "UPDATE `" . $pre . "misc`
+                    SET `valeur` = '".TP_VERSION."'
+                    WHERE intitule = 'teampass_version' AND type = 'admin';"
+                );
+            }
+
+            //<-- Add cronjob if not exist
+            // get php location
+            require_once 'tp.functions.php';
+            $phpLocation = findPhpBinary();
+            if ($phpLocation['error'] === false) {
+                // Instantiate the adapter and repository
+                try {
+                    $crontabAdapter = new CrontabAdapter();
+                    $crontabRepository = new CrontabRepository($crontabAdapter);
+                    $results = $crontabRepository->findJobByRegex('/Teampass\ scheduler/');
+                    if (count($results) === 0) {
+                        // Add the job
+                        $crontabJob = new CrontabJob();
+                        $crontabJob
+                            ->setMinutes('*')
+                            ->setHours('*')
+                            ->setDayOfMonth('*')
+                            ->setMonths('*')
+                            ->setDayOfWeek('*')
+                            ->setTaskCommandLine($phpLocation['path'] . ' ' . $SETTINGS['cpassman_dir'] . '/sources/scheduler.php')
+                            ->setComments('Teampass scheduler');
+                        
+                        $crontabRepository->addJob($crontabJob);
+                        $crontabRepository->persist();
+
+                        array_push(
+                            $returnStatus, 
+                            array(
+                                'id' => 'step5_cronJob', 
+                                'html' => '<i class="fa-solid fa-circle-check fa-lg text-success ml-2 mr-2"></i> <b>If you had manually defined a job in crontab then you should remove it now.</b>',
+                            )
+                        );
+                    } else {
+                        array_push(
+                            $returnStatus, 
+                            array(
+                                'id' => 'step5_cronJob', 
+                                'html' => '<i class="fa-solid fa-circle-check fa-lg text-success ml-2 mr-2"></i><span class="text-info font-italic">Nothing done</span>',
+                            )
+                        );
+                    }
+                } catch (Exception $e) {
+                    // do nothing
                 }
             } else {
-                //settings.php file doesn't exit => ERROR !!!!
-                echo 'document.getElementById("res_step5").innerHTML = '.
-                        '"<img src=\"images/error.png\">&nbsp;Setting.php '.
-                        'file doesn\'t exist! Upgrade can\'t continue without this file.<br />'.
-                        'Please copy your existing settings.php into the \"includes\" '.
-                        'folder of your TeamPass installation ";';
-                echo 'document.getElementById("loader").style.display = "none";';
+                array_push(
+                    $returnStatus, 
+                    array(
+                        'id' => 'step5_cronJob', 
+                        'html' => '<i class="fa-solid fa-times-circle fa-lg text-danger ml-2 mr-2"></i> <b>The PHP path could not be found, please create manually the cron job (see documentation).</b>',
+                    )
+                );
             }
+
+            
+            //-->
+
+            echo '[{'.
+                '"error" : "",'.
+                '"info" : "'.base64_encode(json_encode($returnStatus)).'",'.
+                '"index" : ""'.
+            '}]';
 
             break;
 
-        case "perform_database_dump":
-            $filename = "../includes/config/settings.php";
+        case 'perform_database_dump':
+            $filename = '../includes/config/settings.php';
 
-            require_once "../sources/main.functions.php";
+            include_once '../sources/main.functions.php';
             $pass = defuse_return_decrypted($pass);
 
             $mtables = array();
 
             $mysqli = new mysqli($server, $user, $pass, $database, $port);
             if ($mysqli->connect_error) {
-                die('Error : ('.$mysqli->connect_errno.') '.$mysqli->connect_error);
+                die('Error : (' . $mysqli->connect_errno . ') ' . $mysqli->connect_error);
             }
 
-            $results = $mysqli->query("SHOW TABLES");
+            $results = $mysqli->query('SHOW TABLES');
 
             while ($row = $results->fetch_array()) {
                 $mtables[] = $row[0];
             }
 
-            foreach ($mtables as $table) {
-                $contents .= "-- Table `".$table."` --\n";
+            // Prepare file
+            $backup_file_name = 'sql-backup-' . date('d-m-Y--h-i-s') . '.sql';
+            $fp = fopen('../files/' . $backup_file_name, 'a');
 
-                $results = $mysqli->query("SHOW CREATE TABLE ".$table);
-                while ($row = $results->fetch_array()) {
-                    $contents .= $row[1].";\n\n";
+            foreach ($mtables as $table) {
+                $contents = '-- Table `' . $table . "` --\n";
+                if (fwrite($fp, $contents) === false) {
+                    echo '[{'.
+                        '"error" : "Backup fails - please do it manually",'.
+                        '"index" : ""'.
+                    '}]';
+                    fclose($fp);
+                    return false;
                 }
 
-                $results = $mysqli->query("SELECT * FROM ".$table);
+                $results = $mysqli->query('SHOW CREATE TABLE ' . $table);
+                while ($row = $results->fetch_array()) {
+                    $contents = $row[1] . ";\n\n";
+                    if (fwrite($fp, $contents) === false) {
+                        echo '[{'.
+                            '"error" : "Backup fails - please do it manually",'.
+                            '"index" : ""'.
+                        '}]';
+                        fclose($fp);
+                        return false;
+                    }
+                }
+
+                $results = $mysqli->query('SELECT * FROM ' . $table);
                 $row_count = $results->num_rows;
                 $fields = $results->fetch_fields();
                 $fields_count = count($fields);
 
-                $insert_head = "INSERT INTO `".$table."` (";
-                for ($i = 0; $i < $fields_count; $i++) {
-                    $insert_head .= "`".$fields[$i]->name."`";
+                $insert_head = 'INSERT INTO `' . $table . '` (';
+                for ($i = 0; $i < $fields_count; ++$i) {
+                    $insert_head .= '`' . $fields[$i]->name . '`';
                     if ($i < $fields_count - 1) {
                         $insert_head .= ', ';
                     }
                 }
-                $insert_head .= ")";
+                $insert_head .= ')';
                 $insert_head .= " VALUES\n";
 
                 if ($row_count > 0) {
                     $r = 0;
                     while ($row = $results->fetch_array()) {
                         if (($r % 400) == 0) {
-                            $contents .= $insert_head;
+                            //$contents .= $insert_head;
+                            if (fwrite($fp, $insert_head) === false) {
+                                echo '[{'.
+                                    '"error" : "Backup fails - please do it manually",'.
+                                    '"index" : ""'.
+                                '}]';
+                                fclose($fp);
+                                return false;
+                            }
                         }
-                        $contents .= "(";
-                        for ($i = 0; $i < $fields_count; $i++) {
-                            $row_content = str_replace("\n", "\\n", $mysqli->real_escape_string($row[$i]));
+                        //$contents .= '(';
+                        if (fwrite($fp, '(') === false) {
+                            echo '[{'.
+                                '"error" : "Backup fails - please do it manually",'.
+                                '"index" : ""'.
+                            '}]';
+                            fclose($fp);
+                            return false;
+                        }
+                        for ($i = 0; $i < $fields_count; ++$i) {
+                            $row_content = str_replace("\n", '\\n', $mysqli->real_escape_string($row[$i]));
 
                             switch ($fields[$i]->type) {
                                 case 8:
                                 case 3:
-                                    $contents .= $row_content;
+                                    //$contents .= $row_content;
+                                    if (fwrite($fp, $row_content) === false) {
+                                        echo '[{'.
+                                            '"error" : "Backup fails - please do it manually",'.
+                                            '"index" : ""'.
+                                        '}]';
+                                        fclose($fp);
+                                        return false;
+                                    }
                                     break;
                                 default:
-                                    $contents .= "'".$row_content."'";
+                                    //$contents .= "'".$row_content."'";
+                                    if (fwrite($fp, "'" . $row_content . "'") === false) {
+                                        echo '[{'.
+                                            '"error" : "Backup fails - please do it manually",'.
+                                            '"index" : ""'.
+                                        '}]';
+                                        fclose($fp);
+                                        return false;
+                                    }
                             }
                             if ($i < $fields_count - 1) {
-                                $contents .= ', ';
+                                //$contents .= ', ';
+                                if (fwrite($fp, ', ') === false) {
+                                    echo '[{'.
+                                        '"error" : "Backup fails - please do it manually",'.
+                                        '"index" : ""'.
+                                    '}]';
+                                    fclose($fp);
+                                    return false;
+                                }
                             }
                         }
                         if (($r + 1) == $row_count || ($r % 400) == 399) {
-                            $contents .= ");\n\n";
+                            //$contents .= ");\n\n";
+                            if (fwrite($fp, ");\n\n") === false) {
+                                echo '[{'.
+                                    '"error" : "Backup fails - please do it manually",'.
+                                    '"index" : ""'.
+                                '}]';
+                                fclose($fp);
+                                return false;
+                            }
                         } else {
-                            $contents .= "),\n";
+                            //$contents .= "),\n";
+                            if (fwrite($fp, "),\n") === false) {
+                                echo '[{'.
+                                    '"error" : "Backup fails - please do it manually",'.
+                                    '"index" : ""'.
+                                '}]';
+                                fclose($fp);
+                                return false;
+                            }
                         }
-                        $r++;
+                        ++$r;
                     }
                 }
             }
 
-            $backup_file_name = "sql-backup-".date("d-m-Y--h-i-s").".sql";
-
-            $fp = fopen("../files/".$backup_file_name, 'w+');
-            if (($result = fwrite($fp, $contents))) {
-                echo '[{ "error" : "" , "file" : "files/'.$backup_file_name.'"}]';
-            } else {
-                echo '[{ "error" : "Backup fails - please do it manually."}]';
-            }
             fclose($fp);
-            return false;
+			
+            echo '[{'.
+                '"error" : "",'.
+                '"filename" : "'.$backup_file_name.'",'.
+                '"index" : ""'.
+            '}]';
 
             break;
+
+        case 'perform_nestedtree_categories_population_3.0.0.18':
+            include_once 'upgrade_operations.php';
+            installHandleFoldersCategories(
+                [],
+                $pre
+            );
+
+            echo '[{"error" : ""}]';
+
+            break;
+    
     }
 }
-echo 'document.getElementById("but_next").disabled = "";';
+//

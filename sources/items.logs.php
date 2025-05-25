@@ -1,90 +1,150 @@
 <?php
+
+declare(strict_types=1);
+
 /**
- * @package       items.logs.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      items.logs.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
 
-require_once 'SecureHandler.php';
-session_start();
-if (!isset($_SESSION['CPM']) || $_SESSION['CPM'] != 1 || !isset($_SESSION['key']) || empty($_SESSION['key'])) {
-    die('Hacking attempt...');
-}
+use TeampassClasses\SessionManager\SessionManager;
+use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
+use TeampassClasses\Language\Language;
+use EZimuel\PHPSecureSession;
+use TeampassClasses\PerformChecks\PerformChecks;
+use TeampassClasses\ConfigManager\ConfigManager;
+use TeampassClasses\NestedTree\NestedTree;
 
-// Load config
-if (file_exists('../includes/config/tp.config.php')) {
-    include_once '../includes/config/tp.config.php';
-} elseif (file_exists('./includes/config/tp.config.php')) {
-    include_once './includes/config/tp.config.php';
-} else {
-    throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
-}
-
-require_once $SETTINGS['cpassman_dir'].'/includes/language/'.$_SESSION['user_language'].'.php';
-require_once $SETTINGS['cpassman_dir'].'/includes/config/include.php';
-include $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
+// Load functions
 require_once 'main.functions.php';
 
-//Class loader
-require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';
+// init
+loadClasses('DB');
+$session = SessionManager::getSession();
+$request = SymfonyRequest::createFromGlobals();
+$lang = new Language($session->get('user-language') ?? 'english');
 
-// Connect to mysql server
-require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Database/Meekrodb/db.class.php';
-$pass = defuse_return_decrypted($pass);
-DB::$host = $server;
-DB::$user = $user;
-DB::$password = $pass;
-DB::$dbName = $database;
-DB::$port = $port;
-DB::$encoding = $encoding;
-DB::$error_handler = true;
-$link = mysqli_connect($server, $user, $pass, $database, $port);
-$link->set_charset($encoding);
+// Load config
+$configManager = new ConfigManager();
+$SETTINGS = $configManager->getAllSettings();
+
+// Do checks
+// Instantiate the class with posted data
+$checkUserAccess = new PerformChecks(
+    dataSanitizer(
+        [
+            'type' => htmlspecialchars($request->request->get('type', ''), ENT_QUOTES, 'UTF-8'),
+        ],
+        [
+            'type' => 'trim|escape',
+        ],
+    ),
+    [
+        'user_id' => returnIfSet($session->get('user-id'), null),
+        'user_key' => returnIfSet($session->get('key'), null),
+    ]
+);
+// Handle the case
+echo $checkUserAccess->caseHandler();
+if (
+    $checkUserAccess->userAccessPage('items') === false ||
+    $checkUserAccess->checkSession() === false
+) {
+    // Not allowed page
+    $session->set('system-error_code', ERR_NOT_ALLOWED);
+    include $SETTINGS['cpassman_dir'] . '/error.php';
+    exit;
+}
+
+// Define Timezone
+date_default_timezone_set($SETTINGS['timezone'] ?? 'UTC');
+
+// Set header properties
+header('Content-type: text/html; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+
+// --------------------------------- //
+// Load tree
+$tree = new NestedTree(prefixTable('nested_tree'), 'id', 'parent_id', 'title');
 
 // Prepare POST variables
-$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING);
-$post_key = filter_input(INPUT_POST, 'key', FILTER_SANITIZE_STRING);
-$post_id_item = filter_input(INPUT_POST, 'id_item', FILTER_SANITIZE_NUMBER_INT);
-$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_STRING, FILTER_FLAG_NO_ENCODE_QUOTES);
+$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_key = filter_input(INPUT_POST, 'key', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_FULL_SPECIAL_CHARS, FILTER_FLAG_NO_ENCODE_QUOTES);
 
 // Check KEY and rights
 if (null === $post_key
-    || $post_key != $_SESSION['key']
+    || $post_key != $session->get('key')
 ) {
-    echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+    echo prepareExchangedData(
+        array('error' => 'ERR_KEY_NOT_CORRECT'),
+        'encode'
+    );
     exit();
 }
 
 // Do asked action
 if (null !== $post_type) {
     switch ($post_type) {
-        case "log_action_on_item":
+        case 'log_action_on_item':
             // Check KEY and rights
-            if ($post_key !== $_SESSION['key']) {
-                echo prepareExchangedData(array("error" => "ERR_KEY_NOT_CORRECT"), "encode");
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
+                    array('error' => 'ERR_KEY_NOT_CORRECT'),
+                    'encode'
+                );
                 break;
             }
 
             // decrypt and retreive data in JSON format
             $dataReceived = prepareExchangedData(
                 $post_data,
-                "decode"
+                'decode'
             );
 
-            logItems(
-                filter_var($dataReceived['id'], FILTER_SANITIZE_NUMBER_INT),
-                filter_var(htmlspecialchars_decode($dataReceived['label']), FILTER_SANITIZE_STRING),
-                filter_var($dataReceived['user_id'], FILTER_SANITIZE_NUMBER_INT),
-                filter_var(htmlspecialchars_decode($dataReceived['action']), FILTER_SANITIZE_STRING),
-                filter_var(htmlspecialchars_decode($dataReceived['login']), FILTER_SANITIZE_STRING)
-            );
+            // Check if the data is correct
+            // Required keys: id, label, user_id, action, login
+            $requiredKeys = ['id', 'label', 'user_id', 'action', 'login'];
+            
+            if (
+                is_array($dataReceived) && // check if the data is an array
+                array_diff_key(array_flip($requiredKeys), $dataReceived) === [] &&  // check if all required keys have a valuekeys are present
+                count(array_filter($dataReceived)) === count($requiredKeys) && // check if all required 
+                in_array($dataReceived['action'], ['at_password_shown', 'at_password_copied'], true) && // only log these actions
+                $session->get('user-id') === (int) filter_var($dataReceived['user_id'], FILTER_SANITIZE_NUMBER_INT) // only log actions of the current user
+            ) {
+                // Log the action
+                logItems(
+                    $SETTINGS,
+                    (int) filter_var($dataReceived['id'], FILTER_SANITIZE_NUMBER_INT),
+                    filter_var(htmlspecialchars_decode($dataReceived['label']), FILTER_SANITIZE_FULL_SPECIAL_CHARS),
+                    (int) filter_var($dataReceived['user_id'], FILTER_SANITIZE_NUMBER_INT),
+                    filter_var(htmlspecialchars_decode($dataReceived['action']), FILTER_SANITIZE_FULL_SPECIAL_CHARS),
+                    filter_var(htmlspecialchars_decode($dataReceived['login']), FILTER_SANITIZE_FULL_SPECIAL_CHARS)
+                );
+            }
             break;
     }
 }

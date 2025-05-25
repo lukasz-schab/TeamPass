@@ -1,20 +1,107 @@
 <?php
 /**
- *
- * @file          arabic.php
- * @author        Nils Laumaillé
- * @version       2.1.27
- * @copyright     2009 - 2018 Nils Laumaillé
- * @licensing     GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      arabic.php
+ * ---
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009 - 2022 Teampass.net
+ * @license   https://spdx.org/licenses/GPL-3.0-only.html#licenseText GPL-3.0
+ * ---
+ * @see       https://www.teampass.net
  */
 global $LANG;
-$LANG = array (
+$LANG = array(
+    'user_keys_management' => 'User keys management',
+    'sending_emails' => 'Sending emails',
+    'task_frequency' => 'Frequency (in minutes)',
+    'tasks_information' => 'Task relies on a dedicated cron job. For this, it is requested to add a new entry to your crontab to run Teampass scheduler every minute.<br>Next entry to be added:<br><code>* * * * * path/to/phpbin #teampass_path#/sources/scheduler.php 1>> /dev/null 2>&1</code><br><br>Note: please adapt the path to php bin (in most cases, it can be replaced by <code>php</code>).',
+    'sync_new_ldap_password' => 'Synchronize new password',
+    'error_new_ldap_password_detected' => 'It seems your password has changed and Teampass requires it to encrypt your master private key.',
+    'settings_ldap_tls_certifacte_check' => 'Certificate check for LDAP TLS', 
+    'settings_ldap_tls_certifacte_check_tip' => 'Specifies the certificate checking strategy. <a href="https://gist.github.com/heiglandreas/8a299a6f47a13ba463c3f2da41c679f7" target="_blank">More information</a>.',
+    'generate_new_otp' => 'Generate new OTP',
+    'generate_new_otp_informations' => 'This operation consists in generating from scratch all keys for the selected user. As a consequence, the user will have to provide the new generated OTP at next login.',
+    'execution_time' => 'Execution time',
+    'maximum_number_of_items_to_treat' => 'Maximum number of items to treat during one cycle',
+    'maximum_number_of_items_to_treat_tip' => 'In order to ensure the completion of the script without timeout, it is possible to define a personnal value.',
+    'maximum_time_script_allowed_to_run' => 'Duration in seconds allowed for the script to run in background',
+    'maximum_time_script_allowed_to_run_tip' => 'By default, the PHP script cannot run more than the duration defined by max_execution_time parameter in php.ini file. The goal here is to define a more higher value to ensure that the script is performing completely.',
+    'refresh_data_every_on_screen' => 'Screen refreshing period (in seconds)',
+    'refresh_data_every_on_screen_tip' => 'When browsing the tasks view, this permits to have an updated list based.',
+    'refreshed' => 'Refreshed',
+    'process_details' => 'Process details',
+    'created_at' => 'Created at',
+    'updated_at' => 'Updated at',
+    'finished_at' => 'Finished at',
+    'tasks_manager' => 'Tasks manager',
+    'tasks' => 'Tasks',
+    'task_in_progress_user_not_active' => 'Tasks in progress - User not active',
+    'enable_tasks_manager' => 'Enable heavy tasks to be performed by cron manager',
+    'enable_tasks_manager_tip' => 'This option should be enabled if you noticed that some tasks take long time. This permits to enable to handle those tasks using a background job performed by server cron manager. See documentation for more details.',
+    'settings_api_token_duration' => 'JWT token expiration delay (in seconds)',
+    'settings_api_token_duration_tip' => 'Delay during wich the generated JWT token is valid. After this delay, it is requested to post an authorize request to the API.',
+    'show_encryption_code_to_admin' => 'This is the encrypted code the user will need on this logon. You have asked to see it, please copy it and share in a secure way. Code is',
+    'previous_password' => 'Previous password used to connect to Teampass',
+    'icon' => 'Icon',
+    'icon_on_selection' => 'Icon on selection',
+    'fontawesome_icon_tip' => 'You can specify a Font Awesome icon code selected in <a href="https://fontawesome.com/v5.15/icons?d=gallery&p=2&s=solid&m=free" target="_blank">Free and Solid icons</a>. Leave empty for default icon.',
+    'user_specific_right' => 'User specific right',
+    'email_debug_level' => 'Select a debug level',
+    'email_debug_client' => 'Client commands',
+    'email_debug_server' => 'Client commands and server responses',
+    'email_debug_connection' => 'Client commands, server responses and connection status',
+    'email_debug_low_level' => 'Low-level data output, all messages',
+    'email_debug_level_usage' => 'This setting should be set to None. Only to be used for email debuging during testing purpose. When enabled, it will permit to show an output of the email commands.',
+    'email_body_temporary_login_password' => 'Hello,<br><br>This is a generated email from Teampass passwords manager.<br><br>An administrator has changed your login password for Teampass. Next time you will connect to Teampass, please use the next one:<br><br><b>#enc_code#</b><br><br><br>Cheers',
+    'your_new_password' => 'Your new password',
+    'filter' => 'Filter',
+    'upload_empty_file' => 'Upload empty file',
+    'upload_any_extension_file' => 'Upload any extension file',
+    'upload_any_extension_file_tip' => 'When enabled, this option will allow users to upload any kind of files.',
+    'log_in' => 'Log In',
     '2fa_authentication_selector' => 'Select a 2 factor authenticator method',
+    'create_item_based_upon_template' => 'Use of template for Item',
+    'create_item_based_upon_template_tip' => 'When enabled, this feature permits the author to select a template made of Custom Fields. Notice that this feature requires Custom Fields to be enabled too.',
+    'main_template' => 'Use as template',
+    'is_mandatory' => 'Is mandatory',
+    'error_field_is_mandatory' => 'At least one mandatory field is empty',
+    'visible_by' => 'Visible by',
+    'restrict_visibility_to' => 'Restrict visibility to',
+    'every_roles' => 'Every roles',
+    'masked_textarea' => 'Masked textarea',
+    'position_in_list' => 'Position in list',
+    'masked_text' => 'Masked text',
+    'textarea' => 'Textarea',
+    'data_is_textarea' => 'Data is Textarea',
+    'provide_yubico_identifiers' => 'Please provide your Yubico identifiers',
+    'admin_yubico_authentication_setting' => 'Enable Yubico authentication',
+    'yubico_user_id' => 'Client ID',
+    'press_your_yubico_key' => 'Press your Yubico key',
+    'yubico_user_key' => 'Secret KEY',
+    'yubico_bad_code' => 'Wrong Yubico information',
+    'show_yubico_info_form' => 'Show Yubico user information form',
+    'human_resources' => 'Super manager',
+    'login_attempts' => 'Login attempts since last successful connection',
+    'settings_secure_display_image' => 'Enable secure image display',
+    'settings_secure_display_image_tip' => 'Secure image display permits to read the image through PHP when a user previews an image attached to an item. Pro: the attachment is stored outside the site folder and is not accessible by a hacker. Con: it is slightly slower than previewing directly from an url.',
     'user_ga_code' => 'Email Google Authentication to user',
     'send_ga_code' => 'Set and email Google Authentication code',
     'error_no_email' => 'This user has no email address set!',
@@ -137,7 +224,6 @@ $LANG = array (
     'at_user_new_lastname' => 'User #user_login# lastname changed',
     'at_user_new_name' => 'User #user_login# name changed',
     'info_list_of_connected_users_approximation' => 'Note: This list may show more users connected than are currently logged in.',
-    'disconnect_all_users' => 'Disconnect all users (except administrators)',
     'role' => 'Role',
     'admin_2factors_authentication_setting' => 'Enable Google two-factor authentication',
     'admin_2factors_authentication_setting_tip' => 'Google two-factor authentication enhances logon security. When logging in, a QR code is displayed, which must be scanned into the user\'s Google Authentication app to receive a one-time password. Requires all users to have Google authentication app on an Internet-connected mobile device.',
@@ -241,7 +327,7 @@ $LANG = array (
     'no_previous_pw' => 'No previous password',
     'request_access_ot_item' => 'Request access to modify',
     'email_request_access_subject' => 'You have a request to enable access to your password item',
-    'email_request_access_mail' => 'Hello,<br><br>This is a generated email from Teampass passwords manager.<br><br>User #tp_user# has requested access to password item \'#tp_item#\'.<br><br>The request comes with the next justification:<br><i>\'#tp_reason#\'</i><br><br>Please review this request  and confirm that you will authorize access.<br><br>Greetings.',
+    'email_request_access_mail' => 'Hello,<br><br>This is a generated email from Teampass passwords manager.<br><br>User #tp_user# has requested access to password item \\\'#tp_item#\\\'.<br><br>The request comes with the next justification:<br><i>\\\'#tp_reason#\\\'</i><br><br>Please review this request  and confirm that you will authorize access.<br><br>Greetings.',
     'admin_action_change_salt_key' => 'Change the main salt key used for encryption',
     'admin_action_change_salt_key_tip' => 'Before changing the salt key, please enable maintenance mode and perform a full backup of both the database and attachments in the upload folder.',
     'block_admin_info' => 'Administrator\'s Info',
@@ -507,7 +593,7 @@ $LANG = array (
     'import_keepass_to_folder' => 'Select the destination folder',
     'import_kp_finished' => 'Import from KeePass is now finished ! The required password strength for new folders has been set to Medium. You may wish to modify the password strength requirement.',
     'import_to_folder' => 'Select the items you wish to import to folder:',
-    'index_add_one_hour' => 'Extend session duration',
+    'index_add_one_hour' => 'Extend session 1 hour',
     'index_alarm' => 'ALARM!!!',
     'index_bas_pw' => 'Bad password for this account!',
     'index_change_pw' => 'Change my password',
@@ -708,7 +794,6 @@ $LANG = array (
     'warning_screen_height' => 'Warning: web browser screen height insufficient to display password item list.',
     'yes' => 'Yes',
     'your_version' => 'Your version',
-    'disconnect_all_users_sure' => 'Are you sure you\'d like to disconnect all users?',
     'Test the Email configuration' => 'Test email configuration',
     'url_copied_clipboard' => 'URL copied to clipboard',
     'url_copy' => 'Copy URL to clipboard',
@@ -811,11 +896,26 @@ $LANG = array (
     'duo_message' => 'DUO Security checks are now done. Sending your credentials to Teampass.<br />Please wait ... the page will be reloaded once authentication process will be done.',
     'duo_loading_iframe' => 'DUO Security authentication is loading ... Please wait.',
     'settings_duo' => 'Enable DUO Security two-factor authentication',
-    'settings_duo_tip' => 'Duo Security cloud-based two-factor authentication from duo.com. One-time use login passcodes via SMS, voice call, or mobile app. An account with Duo is required to use this feature. Two-factor login via Duo will be required for all non-admin users when activated.',
-    'admin_duo_akey' => 'AKEY',
-    'admin_duo_ikey' => 'IKEY',
-    'admin_duo_skey' => 'SKEY',
-    'admin_duo_host' => 'HOST',
+    'settings_duo_tip' => 'Duo Security cloud-based two-factor authentication from duo.com. One-time use login passcodes via SMS, voice call, or mobile app. An account with Duo is required to use this feature. Two-factor login via Duo will be required for all non-admin users when activated.<br/>Create or convert the teampass application to the Universal Prompt from the Duo administration page.',
+    'admin_duo_ikey' => 'Client ID (duo_ikey)',
+    'admin_duo_skey' => 'Client secret (duo_skey)',
+    'admin_duo_host' => 'API hostname (HOST)',
+    'select_valid_2fa_credentials' => 'Please make sure to select a valid 2FA method',
+    'duo_config_error' => '= Duo config error =<br/> Check your Duo config <br/>',
+    'duo_error_failopen' => 'Could not connect to Duo, 2FA cannot be performed but config is configured to continue.',
+    'duo_error_secure' => 'Duo is currently unavailable. <br/>Login cannot proceed, contact your administrator if the issue persist.',
+    'duo_error_check_config' => '<br/><br/>Administrator, please confirm your Duo config is correct.<br/>',
+    'duo_error_auth' => 'Error while trying to complet Duo Authentication. <br /> ',
+    'duo_redirect_uri' => 'Redirecting to Duo Prompt',
+    'duo_no_data' => 'Missing data or no saved Duo state were found, please login again.',
+    'duo_no_state_received' => 'No state received from Duo. Try again or contact your administrator.',
+    'duo_error_state' => 'Duo state mismatch. Please login again',
+    'duo_error_decoding' => 'Error decoding the Duo result. Contact your administrator if the issue persist.',
+    'duo-run-config-check' => 'Check Duo Config',
+    'duo-config-check-success' => 'Duo config correct and Teampass server able to talk to the Duo API',
+    'duo_login_mismatch' => 'Username from the original Duo request does not match the login submitted.',
+    'duo_error_url' => 'Error while creating the DUO Universal Prompt URL',
+    'duo_error_decrypt' => 'Error while completing Duo authentication, please login again.',
     'generate_random_key' => 'Generate random key',
     'duo_save_sk_file' => 'Save data in sk.php file',
     'settings_duo_explanation' => 'Credentials from the Duo Security administration page for your account must be input here. Settings will be stored in the sk.php file only after pressing the save button.',
@@ -897,10 +997,8 @@ $LANG = array (
     'server_auto_update_password_enabled_tip' => 'Automatic user password change enabled',
     'server_password_change_enable_tip' => 'This setting adds an option in the password item to automatically change the user password on a server address listed in the url. This requires the remote UNIX server to allow username and password login via SSH. Automatic scheduled password changes can be performed after adding <i>/files/script.ssh.php</i> to crontab to run once a day on the password manager webserver.',
     'can_manage_all_users' => 'Human Resources - User can manage all other users (except administrators) regardless of group membership. HR user will also have manager rights added to their account.',
-    'error_bad_credentials_more_than_3_times' => 'Login credentials incorrect!<br>Please wait 10 seconds before next attempt',
     'settings_ldap_object_class' => 'Class to search',
     'settings_ldap_object_class_tip' => 'LDAP class to search, such as user account or POSIX account',
-    'rebuild_config_file' => 'Rebuild the configuration file',
     'rebuild_config_file_tip' => 'The configuration file contains system variables, and is used when these settings are needed before the database connection has been established. Rebuilding the configuration file saves the database values to the file, and can be done any time. The default location is ./includes/config/tp.config.php, but the file should be located outside the www directory for security.',
     'error_folder_complexity_lower_than_top_folder' => 'Subfolders must have password strength set the same or higher than parent folder',
     'rebuild_config_file' => 'Rebuild configuration file',
@@ -909,7 +1007,6 @@ $LANG = array (
     'failed_logins' => 'Failed Logins',
     'admin_2factor_authentication_tab' => '2FA Options',
     'error_only_numbers_in_folder_name' => 'Folder label can not be just a number. Please give your folder a name which includes letters.',
-    'folder_will_be_moved_below' => 'The folder <b><span id=\'move_folder_title\'></span></b> will be moved below folder:',
     'error_upload_runtime_not_found' => 'Upload feature: No runtime found.',
     'runtime_upload' => 'Upload feature: runtime',
     'encrypted_data' => 'Data is encrypted in database',
@@ -963,7 +1060,7 @@ $LANG = array (
     'suggest_password_change' => 'Suggest a password change',
     'suggest_password_change_intro' => 'Make your change proposals using the next fields.',
     'suggestion_done' => 'Suggestion has been stored.',
-    'suggest_change_password_blank' => 'Leave this field empty if you DON\'T want to suggest a password change',
+    'suggest_change_password_blank' => 'Leave this field empty if you DON\\\'T want to suggest a password change',
     'item_id' => 'Item ID',
     'approve' => 'Approve',
     'reject' => 'Reject',
@@ -1055,7 +1152,6 @@ $LANG = array (
     'nothing_to_do' => 'Nothing to do.',
     'continue' => 'Continue',
     'please_confirm_operation' => 'Please confirm the operation',
-    'setting_disabled_by_admin' => 'This setting is disabled by Administrator',
     'text' => 'Text',
     'masked' => 'Masked',
     'type' => 'Type',
@@ -1092,34 +1188,5 @@ $LANG = array (
     'duration_login_attempt' => 'Seconds till auto login:',
     'newly_created_user_role' => 'Newly created user has role',
     'at_user_updated' => 'User #user_login# was updated',
-    'human_resources' => 'Super manager',
-    'login_attempts' => 'Login attempts since last successful connection',
-    'settings_secure_display_image' => 'Enable secure image display',
-    'settings_secure_display_image_tip' => 'Secure image display permits to read the image through PHP when a user previews an image attached to an item. Pro: the attachment is stored outside the site folder and is not accessible by a hacker. Con: it is slightly slower than previewing directly from an url.',
-    'provide_yubico_identifiers' => 'Please provide your Yubico identifiers',
-    'admin_yubico_authentication_setting' => 'Enable Yubico authentication',
-    'yubico_user_id' => 'Client ID',
-    'yubico_user_key' => 'Secret KEY',
-    'yubico_bad_code' => 'Wrong Yubico information',
-    'show_yubico_info_form' => 'Show Yubico user information form',
-    'press_your_yubico_key' => 'Press your Yubico key',
-    'position_in_list' => 'Position in list',
-    'visible_by' => 'Visible by',
-    'restrict_visibility_to' => 'Restrict visibility to',
-    'every_roles' => 'Every roles',
-    'masked_text' => 'Masked text',
-    'textarea' => 'Textarea',
-    'error_field_is_mandatory' => 'At least one mandatory field is empty',
-    'is_mandatory' => 'Is mandatory',
-    'main_template' => 'Use as template',
-    'create_item_based_upon_template_tip' => 'When enabled, this feature permits the author to select a template made of Custom Fields. Notice that this feature requires Custom Fields to be enabled too.',
-    'create_item_based_upon_template' => 'Use of template for Item',
-    'log_in' => 'Log In',
-    'filter' => 'Filter',
-    'upload_empty_file' => 'Upload empty file',
-    'upload_any_extension_file' => 'Upload any extension file',
-    'upload_any_extension_file_tip' => 'When enabled, this option will allow users to upload any kind of files.',
-    '2factors_expected_for_admin' => 'Administrator requires 2FA to get logged',
-    '2factors_expected_for_admin_tip' => 'By default, an Administrator has to use a 2FA method to get logged. If not enabled, Administrator will not require it to get logged even if 2FA is enabled for any other user. Make sure you test another account with 2 factor auth before enabling for admin as you could lock yourself out of the system permanently.',
     '' => ''
 );

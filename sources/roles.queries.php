@@ -1,452 +1,800 @@
 <?php
+
+declare(strict_types=1);
+
 /**
- * @package       roles.queries.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      roles.queries.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
 
-require_once 'SecureHandler.php';
-session_start();
-if (!isset($_SESSION['CPM']) || $_SESSION['CPM'] != 1 ||
-    !isset($_SESSION['user_id']) || empty($_SESSION['user_id']) ||
-    !isset($_SESSION['key']) || empty($_SESSION['key'])
-) {
-    die('Hacking attempt...');
-}
+use TeampassClasses\NestedTree\NestedTree;
+use TeampassClasses\SessionManager\SessionManager;
+use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
+use TeampassClasses\Language\Language;
+use TeampassClasses\PerformChecks\PerformChecks;
+use TeampassClasses\ConfigManager\ConfigManager;
+use TeampassClasses\LdapExtra\LdapExtra;
+use TeampassClasses\LdapExtra\OpenLdapExtra;
+use TeampassClasses\LdapExtra\ActiveDirectoryExtra;
 
-// Load config
-if (file_exists('../includes/config/tp.config.php')) {
-    include_once '../includes/config/tp.config.php';
-} elseif (file_exists('./includes/config/tp.config.php')) {
-    include_once './includes/config/tp.config.php';
-} else {
-    throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
-}
-/* do checks */
-require_once $SETTINGS['cpassman_dir'].'/includes/config/include.php';
-require_once $SETTINGS['cpassman_dir'].'/sources/checks.php';
-if (!checkUser($_SESSION['user_id'], $_SESSION['key'], "manage_roles")) {
-    $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-    include $SETTINGS['cpassman_dir'].'/error.php';
-    exit();
-}
-
-include $SETTINGS['cpassman_dir'].'/includes/language/'.$_SESSION['user_language'].'.php';
-include $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-header("Content-type: text/html; charset=utf-8");
+// Load functions
 require_once 'main.functions.php';
 
-require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';
+// init
+loadClasses('DB');
+$session = SessionManager::getSession();
+$request = SymfonyRequest::createFromGlobals();
+$lang = new Language($session->get('user-language') ?? 'english');
 
-//Connect to DB
-require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Database/Meekrodb/db.class.php';
-$pass = defuse_return_decrypted($pass);
-DB::$host = $server;
-DB::$user = $user;
-DB::$password = $pass;
-DB::$dbName = $database;
-DB::$port = $port;
-DB::$encoding = $encoding;
-DB::$error_handler = true;
-$link = mysqli_connect($server, $user, $pass, $database, $port);
-$link->set_charset($encoding);
+// Load config
+$configManager = new ConfigManager();
+$SETTINGS = $configManager->getAllSettings();
 
-//Build tree
-$tree = new SplClassLoader('Tree\NestedTree', $SETTINGS['cpassman_dir'].'/includes/libraries');
-$tree->register();
-$tree = new Tree\NestedTree\NestedTree($pre.'nested_tree', 'id', 'parent_id', 'title');
+// Do checks
+// Instantiate the class with posted data
+$checkUserAccess = new PerformChecks(
+    dataSanitizer(
+        [
+            'type' => htmlspecialchars($request->request->get('type', ''), ENT_QUOTES, 'UTF-8'),
+        ],
+        [
+            'type' => 'trim|escape',
+        ],
+    ),
+    [
+        'user_id' => returnIfSet($session->get('user-id'), null),
+        'user_key' => returnIfSet($session->get('key'), null),
+    ]
+);
+// Handle the case
+echo $checkUserAccess->caseHandler();
+if (
+    $checkUserAccess->userAccessPage('roles') === false ||
+    $checkUserAccess->checkSession() === false
+) {
+    // Not allowed page
+    $session->set('system-error_code', ERR_NOT_ALLOWED);
+    include $SETTINGS['cpassman_dir'] . '/error.php';
+    exit;
+}
 
-if (null !== filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
-    switch (filter_input(INPUT_POST, 'type', FILTER_SANITIZE_STRING)) {
-        #CASE adding a new role
-        case "add_new_role":
-            // Prepare POST variables
-            $post_name = filter_input(INPUT_POST, 'name', FILTER_SANITIZE_STRING);
+// Define Timezone
+date_default_timezone_set($SETTINGS['timezone'] ?? 'UTC');
 
-            //Check if role already exist : No similar roles
-            $tmp = DB::query(
-                "SELECT * FROM ".prefix_table("roles_title")." WHERE title = %s",
-                stripslashes($post_name)
-            );
-            $counter = DB::count();
-            if ($counter == 0) {
-                db::debugmode(false);
-                DB::insert(
-                    prefix_table("roles_title"),
+// Set header properties
+header('Content-type: text/html; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+
+// --------------------------------- //
+
+// Load tree
+$tree = new NestedTree(prefixTable('nested_tree'), 'id', 'parent_id', 'title');
+
+// Prepare post variables
+$post_key = filter_input(INPUT_POST, 'key', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_type = filter_input(INPUT_POST, 'type', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$post_data = filter_input(INPUT_POST, 'data', FILTER_SANITIZE_FULL_SPECIAL_CHARS, FILTER_FLAG_NO_ENCODE_QUOTES);
+
+if (null !== $post_type) {
+    switch ($post_type) {
+        /*
+         * BUILD liste of folders
+         */
+        case 'build_matrix':
+            // Check KEY
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
                     array(
-                        'title' => noHTML($post_name),
-                        'complexity' => filter_input(INPUT_POST, 'complexity', FILTER_SANITIZE_NUMBER_INT),
-                        'creator_id' => $_SESSION['user_id']
-                    )
+                        'error' => true,
+                        'message' => $lang->get('key_is_not_correct'),
+                    ),
+                    'encode'
                 );
-                $role_id = DB::insertId();
-
-                if ($role_id != 0) {
-                    //Actualize the variable
-                    $_SESSION['nb_roles']++;
-
-                    // get some data
-                    $data_tmp = DB::queryfirstrow(
-                        "SELECT fonction_id FROM ".prefix_table("users")." WHERE id = %s",
-                        $_SESSION['user_id']
-                    );
-
-                    // add new role to user
-                    $tmp = str_replace(";;", ";", $data_tmp['fonction_id']);
-                    if (substr($tmp, -1) == ";") {
-                        $_SESSION['fonction_id'] = str_replace(";;", ";", $data_tmp['fonction_id'].$role_id);
-                    } else {
-                        $_SESSION['fonction_id'] = str_replace(";;", ";", $data_tmp['fonction_id'].";".$role_id);
-                    }
-                    // store in DB
-                    DB::update(
-                        prefix_table("users"),
-                        array(
-                            'fonction_id' => $_SESSION['fonction_id']
-                            ),
-                        "id = %i",
-                        $_SESSION['user_id']
-                    );
-                    $_SESSION['user_roles'] = explode(";", $_SESSION['fonction_id']);
-
-
-                    echo '[ { "error" : "no" } ]';
-                } else {
-                    echo '[ { "error" : "yes" , "message" : "Database error. Contact your administrator!" } ]';
-                }
-            } else {
-                echo '[ { "error" : "yes" , "message" : "'.$LANG['error_role_exist'].'" } ]';
+                break;
+            } elseif ($session->get('user-read_only') === 1) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('error_not_allowed_to'),
+                    ),
+                    'encode'
+                );
+                break;
             }
+
+            // Prepare variables
+            $post_role_id = filter_input(INPUT_POST, 'role_id', FILTER_SANITIZE_NUMBER_INT);
+            $arrData = array();
+
+            //Display each folder with associated rights by role
+            $descendants = $tree->getDescendants();
+            foreach ($descendants as $node) {
+                if (in_array($node->id, $session->get('user-accessible_folders')) === true
+                    && in_array($node->id, $session->get('user-personal_visible_folders')) === false
+                ) {
+                    $arrNode = array();
+                    $arrNode['ident'] = (int) $node->nlevel;
+                    $arrNode['title'] = $node->title;
+                    $arrNode['id'] = $node->id;
+
+                    $arbo = $tree->getPath($node->id, false);
+                    $parentClass = array();
+                    foreach ($arbo as $elem) {
+                        array_push($parentClass, $elem->title);
+                    }
+                    $arrNode['path'] = $parentClass;
+
+                    // Role access
+                    $role_detail = DB::queryFirstRow(
+                        'SELECT *
+                        FROM '.prefixTable('roles_values').'
+                        WHERE folder_id = %i AND role_id = %i',
+                        $node->id,
+                        $post_role_id
+                    );
+
+                    if (DB::count() > 0) {
+                        $arrNode['access'] = $role_detail['type'];
+                    } else {
+                        $arrNode['access'] = 'none';
+                    }
+
+                    array_push($arrData, $arrNode);
+                }
+            }
+
+            echo prepareExchangedData(
+                array(
+                    'error' => false,
+                    'message' => '',
+                    'matrix' => $arrData,
+                ),
+                'encode'
+            );
+
             break;
 
-        //-------------------------------------------
-        #CASE delete a role
-        case "delete_role":
-            // Prepare POST variables
-            $post_id = filter_input(INPUT_POST, 'id', FILTER_SANITIZE_NUMBER_INT);
+        case 'change_access_right_on_folder':
+            // Check KEY
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('key_is_not_correct'),
+                    ),
+                    'encode'
+                );
+                break;
+            } elseif ($session->get('user-read_only') === 1) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('error_not_allowed_to'),
+                    ),
+                    'encode'
+                );
+                break;
+            }
+
+            // decrypt and retrieve data in JSON format
+            $dataReceived = prepareExchangedData(
+                $post_data,
+                'decode'
+            );
+
+            // Prepare variables
+            $post_selectedFolders = filter_var_array($dataReceived['selectedFolders'], FILTER_SANITIZE_NUMBER_INT);
+            $post_access = filter_var($dataReceived['access'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $post_roleId = filter_var($dataReceived['roleId'], FILTER_SANITIZE_NUMBER_INT);
+            $post_propagate = filter_var($dataReceived['propagate'], FILTER_SANITIZE_NUMBER_INT);
+
+            // Loop on selection
+            foreach ($post_selectedFolders as $folderId) {
+                // delete
+                //db::debugmode(true);
+                DB::delete(
+                    prefixTable('roles_values'),
+                    'folder_id = %i AND role_id = %i',
+                    $folderId,
+                    $post_roleId
+                );
+
+                //Store in DB if "access" is not empty (no access to folder)
+                if (!empty($post_access)) {
+                    DB::insert(
+                        prefixTable('roles_values'),
+                        array(
+                            'folder_id' => $folderId,
+                            'role_id' => $post_roleId,
+                            'type' => $post_access,
+                        )
+                    );
+                }
+
+                // Manage descendants
+                if ((int) $post_propagate === 1) {
+                    $descendants = $tree->getDescendants($folderId);
+                    foreach ($descendants as $node) {
+                        // delete
+                        DB::delete(
+                            prefixTable('roles_values'),
+                            'folder_id = %i AND role_id = %i',
+                            $node->id,
+                            $post_roleId
+                        );
+
+                        //Store in DB if "access" is not empty (no access to folder)        
+                        if (!empty($post_access)) {
+                            DB::insert(
+                                prefixTable('roles_values'),
+                                array(
+                                    'folder_id' => $node->id,
+                                    'role_id' => $post_roleId,
+                                    'type' => $post_access,
+                                )
+                            );
+                        }
+                    }
+                }
+            }
+
+            /*
+            // update folders rights for users in cache_tree
+            // Requested for real-time changes
+            $rows = DB::query(
+                'SELECT increment_id, folders
+                FROM ' . prefixTable('cache_tree'),
+            );
+
+            foreach($rows as $row) {
+                if ($row['folders'] === '' || $post_selectedFolders === null) {
+                    continue;
+                }
+                // get visible folders
+                $arr = json_decode($row['folders'], true);
+                
+                foreach($arr as $folder) {
+                    if (in_array($folder, $post_selectedFolders) === true) {
+                        unset($arr[$folder]);
+                    }
+                }
+                print_r($arr);
+
+                // update
+                /*DB::update(
+                    prefixTable('cache_tree'),
+                    array(
+                        'folders' => json_encode($arr),
+                    ),
+                    'increment_id = %i',
+                    $row['increment_id']
+                );*/
+                /*
+            }
+            */
+
+            echo prepareExchangedData(
+                array(
+                    'error' => false,
+                    'message' => '',
+                ),
+                'encode'
+            );
+
+            break;
+
+        case 'change_role_definition':
+            // Check KEY
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('key_is_not_correct'),
+                    ),
+                    'encode'
+                );
+                break;
+            } elseif ($session->get('user-read_only') === 1) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('error_not_allowed_to'),
+                    ),
+                    'encode'
+                );
+                break;
+            }
+
+            // decrypt and retrieve data in JSON format
+            $dataReceived = prepareExchangedData(
+                $post_data,
+                'decode'
+            );
+            
+            // Prepare variables
+            $post_folderId = filter_var($dataReceived['folderId'], FILTER_SANITIZE_NUMBER_INT);
+            $post_complexity = filter_var($dataReceived['complexity'], FILTER_SANITIZE_NUMBER_INT);
+            $post_label = filter_var($dataReceived['label'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $post_allowEdit = filter_var($dataReceived['allowEdit'], FILTER_SANITIZE_NUMBER_INT);
+            $post_action = filter_var($dataReceived['action'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+
+            // Init
+            $return = array(
+                'error' => false,
+                'message' => '',
+            );
+
+            if ($post_action === 'edit_role') {
+                //Check if role already exist : No similar roles
+                DB::query(
+                    'SELECT *
+                    FROM '.prefixTable('roles_title').'
+                    WHERE id = %i',
+                    $post_folderId
+                );
+                $counter = DB::count();
+
+                if ($counter > 0) {
+                    DB::update(
+                        prefixTable('roles_title'),
+                        array(
+                            'title' => $post_label,
+                            'complexity' => $post_complexity,
+                            'allow_pw_change' => $post_allowEdit,
+                        ),
+                        'id = %i',
+                        $post_folderId
+                    );
+                } else {
+                    // Adding new folder not possible as it exists
+                    $return['error'] = true;
+                    $return['message'] = $lang->get('error_role_exist');
+                }
+            } elseif ($post_action === 'add_role') {
+                //Check if role already exist : No similar roles
+                DB::query(
+                    'SELECT *
+                    FROM '.prefixTable('roles_title').'
+                    WHERE title = %s',
+                    $post_label
+                );
+                $counter = DB::count();
+
+                if ($counter === 0) {
+                    // Adding new role is possible as it doesn't exist
+                    DB::insert(
+                        prefixTable('roles_title'),
+                        array(
+                            'title' => $post_label,
+                            'complexity' => $post_complexity,
+                            'allow_pw_change' => $post_allowEdit,
+                            'creator_id' => $session->get('user-id'),
+                        )
+                    );
+                    $return['new_role_id'] = DB::insertId();
+                } else {
+                    // Adding new folder not possible as it exists
+                    $return['error'] = true;
+                    $return['message'] = $lang->get('error_role_exist');
+                }
+            } elseif ($post_action === 'edit_folder') {
+                //Check if role already exist : No similar roles
+                DB::query(
+                    'SELECT *
+                    FROM '.prefixTable('roles_title').'
+                    WHERE title = %s AND id != %i',
+                    $post_label,
+                    $post_folderId
+                );
+                $counter = DB::count();
+
+                if ($counter === 0) {
+                    // Editing the folder
+                    DB::update(
+                        prefixTable('roles_title'),
+                        array(
+                            'title' => $post_label,
+                            'complexity' => $post_complexity,
+                            'allow_pw_change' => $post_allowEdit,
+                        ),
+                        'id = %i',
+                        $post_folderId
+                    );
+                } else {
+                    // Adding new folder not possible as it exists
+                    $return['error'] = true;
+                    $return['message'] = $lang->get('error_role_exist');
+                }
+            } elseif ($post_action === 'add_folder') {
+                //Check if role already exist : No similar roles
+                DB::query(
+                    'SELECT *
+                    FROM '.prefixTable('roles_title').'
+                    WHERE title = %s',
+                    $post_label
+                );
+                $counter = DB::count();
+
+                if ($counter === 0) {
+                    // Adding new folder is possible as it doesn't exist
+                    DB::insert(
+                        prefixTable('roles_title'),
+                        array(
+                            'title' => $post_label,
+                            'complexity' => $post_complexity,
+                            'allow_pw_change' => $post_allowEdit,
+                            'creator_id' => $session->get('user-id'),
+                        )
+                    );
+                    $role_id = DB::insertId();
+
+                    if ($role_id !== 0) {
+                        //Actualize the variable
+                        $session->set('user-nb_roles', $session->get('user-nb_roles') + 1);
+
+                        // get some data
+                        $data_tmp = DB::queryFirstRow(
+                            'SELECT fonction_id FROM '.prefixTable('users').' WHERE id = %s',
+                            $session->get('user-id')
+                        );
+
+                        // add new role to user
+                        $tmp = $data_tmp['fonction_id'] . (substr($data_tmp['fonction_id'], -1) == ';' ? $role_id : ';' . $role_id);
+                        $session->set('user-roles', str_replace(';;', ';', $tmp));
+
+                        // store in DB
+                        DB::update(
+                            prefixTable('users'),
+                            [
+                                'fonction_id' => $session->get('user-roles'),
+                            ],
+                            'id = %i',
+                            $session->get('user-id')
+                        );
+                        $session->set('user-roles_array', explode(';', $session->get('user-roles')));
+
+                        $return['new_role_id'] = $role_id;
+                    }
+                } else {
+                    // Editing the folder not possible as it doesn't exist
+                    $return['error'] = true;
+                    $return['message'] = $lang->get('role_not_exist');
+                }
+            } else {
+                // Error
+                $return['error'] = true;
+                $return['message'] = $lang->get('error_unknown');
+            }
+
+            // Prepare returned values
+            define(
+                'TP_PW_COMPLEXITY',
+                [
+                    TP_PW_STRENGTH_1 => array(TP_PW_STRENGTH_1, $lang->get('complex_level1'), 'fas fa-thermometer-empty text-danger'),
+                    TP_PW_STRENGTH_2 => array(TP_PW_STRENGTH_2, $lang->get('complex_level2'), 'fas fa-thermometer-quarter text-warning'),
+                    TP_PW_STRENGTH_3 => array(TP_PW_STRENGTH_3, $lang->get('complex_level3'), 'fas fa-thermometer-half text-warning'),
+                    TP_PW_STRENGTH_4 => array(TP_PW_STRENGTH_4, $lang->get('complex_level4'), 'fas fa-thermometer-three-quarters text-success'),
+                    TP_PW_STRENGTH_5 => array(TP_PW_STRENGTH_5, $lang->get('complex_level5'), 'fas fa-thermometer-full text-success'),
+                ]
+            );
+
+            // ensure categories are set
+            handleFoldersCategories(
+                []
+            );
+            
+            $return = array_merge(
+                $return,
+                [
+                    'icon' => TP_PW_COMPLEXITY[$post_complexity][2],
+                    'text' => TP_PW_COMPLEXITY[$post_complexity][1],
+                    'value' => TP_PW_COMPLEXITY[$post_complexity][0],
+                    'allow_pw_change' => $post_allowEdit,
+                ]
+            );
+            
+            // send data
+            echo prepareExchangedData(
+                $return,
+                'encode'
+            );
+            break;
+
+        case 'delete_role':
+            // Check KEY
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('key_is_not_correct'),
+                    ),
+                    'encode'
+                );
+                break;
+            } elseif ($session->get('user-read_only') === 1) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('error_not_allowed_to'),
+                    ),
+                    'encode'
+                );
+                break;
+            }
+
+            // decrypt and retrieve data in JSON format
+            $dataReceived = prepareExchangedData(
+                $post_data,
+                'decode'
+            );
+
+            // Prepare variables
+            $post_roleId = filter_var($dataReceived['roleId'], FILTER_SANITIZE_NUMBER_INT);
 
             // Delete roles
-            DB::delete(prefix_table("roles_title"), "id = %i", $post_id);
-            DB::delete(prefix_table("roles_values"), "role_id = %i", $post_id);
+            DB::delete(
+                prefixTable('roles_title'),
+                'id = %i',
+                $post_roleId
+            );
+            DB::delete(
+                prefixTable('roles_values'),
+                'role_id = %i',
+                $post_roleId
+            );
 
             //Actualize the variable
-            $_SESSION['nb_roles']--;
+            $session->set('user-nb_roles', $session->get('user-nb_roles') - 1);
 
             // parse all users to remove this role
             $rows = DB::query(
-                "SELECT id, fonction_id FROM ".prefix_table("users")."
-                ORDER BY id ASC"
+                'SELECT id, fonction_id FROM '.prefixTable('users').'
+                ORDER BY id ASC'
             );
             foreach ($rows as $record) {
-                $tab = explode(";", $record['fonction_id']);
-                if (($key = array_search($post_id, $tab)) !== false) {
+                $tab = explode(';', $record['fonction_id']);
+                $key = array_search($post_roleId, $tab);
+                if ($key !== false) {
                     // remove the deleted role id
                     unset($tab[$key]);
 
                     // store new list of functions
                     DB::update(
-                        prefix_table("users"),
-                        array(
-                            'fonction_id' => rtrim(implode(";", $tab), ";")
-                            ),
-                        "id = %i",
+                        prefixTable('users'),
+                        [
+                            'fonction_id' => rtrim(implode(';', $tab), ';'),
+                        ],
+                        'id = %i',
                         $record['id']
                     );
                 }
             }
 
-            echo '[ { "error" : "no" } ]';
+            // ensure categories are set
+            handleFoldersCategories(
+                []
+            );
+
+            // send data
+            echo prepareExchangedData(
+                [
+                    'error' => false,
+                    'message' => '',
+                ],
+                'encode'
+            );
             break;
 
-        //-------------------------------------------
-        #CASE editing a role
-        case "edit_role":
-            // Prepare POST variables
-            $post_id = filter_input(INPUT_POST, 'id', FILTER_SANITIZE_NUMBER_INT);
-            $post_title = filter_input(INPUT_POST, 'title', FILTER_SANITIZE_STRING);
-
-            //Check if role already exist : No similar roles
-            DB::query(
-                "SELECT * FROM ".prefix_table("roles_title")." WHERE title = %s AND id != %i",
-                $post_title,
-                $post_id
-            );
-            $counter = DB::count();
-            if ($counter == 0) {
-                DB::update(
-                    prefix_table("roles_title"),
+        /*
+         * GET LDAP LIST OF GROUPS
+         */
+        case 'get_list_of_groups_in_ldap':
+            // Check KEY
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
                     array(
-                        'title' => noHTML(filter_input(INPUT_POST, 'title', FILTER_SANITIZE_STRING)),
-                        'complexity' => filter_input(INPUT_POST, 'complexity', FILTER_SANITIZE_NUMBER_INT),
+                        'error' => true,
+                        'message' => $lang->get('key_is_not_correct'),
                     ),
-                    'id = %i',
-                    filter_input(INPUT_POST, 'id', FILTER_SANITIZE_NUMBER_INT)
+                    'encode'
                 );
-                echo '[ { "error" : "no" } ]';
-            } else {
-                echo '[ { "error" : "yes" , "message" : "'.$LANG['error_role_exist'].'" } ]';
+                break;
             }
-            break;
 
-        /******************************************
-        *CASE editing a role
-        */
-        case "allow_pw_change_for_role":
-            DB::update(
-                prefix_table("roles_title"),
+
+            // Initialisation de la connexion LDAP et des paramètres
+            $connection = null;
+            $ldapExtra = null;
+            $retAD = [];
+
+            try {
+                switch ($SETTINGS['ldap_type']) {
+                    case 'ActiveDirectory':
+                        $ldapExtra = new LdapExtra($SETTINGS);
+                        $ldapConnection = $ldapExtra->establishLdapConnection();
+
+                        // Create an instance of OpenLdapExtra and configure it
+                        $openLdapExtra = new ActiveDirectoryExtra();
+                        $groupsData = $openLdapExtra->getADGroups($ldapConnection, $SETTINGS);
+                        break;
+                    case 'OpenLDAP':
+                        // Establish connection for OpenLDAP
+                        $ldapExtra = new LdapExtra($SETTINGS);
+                        $ldapConnection = $ldapExtra->establishLdapConnection();
+
+                        // Create an instance of OpenLdapExtra and configure it
+                        $openLdapExtra = new OpenLdapExtra();
+                        $groupsData = $openLdapExtra->getADGroups($ldapConnection, $SETTINGS);
+                        break;
+                    default:
+                        throw new Exception("Unsupported LDAP type: " . $SETTINGS['ldap_type']);
+                }
+            } catch (Exception $e) {
+                if (defined('LOG_TO_SERVER') && LOG_TO_SERVER === true) {
+                    error_log('TEAMPASS Error - ldap - '.$e->getMessage());
+                }
+                // deepcode ignore ServerLeak: No important data is sent and it is encrypted before sending
+                echo prepareExchangedData(array(
+                    'error' => true,
+                    'message' => 'An error occurred.',
+                ), 'encode');
+                exit;
+            }
+            
+            // Check the type of LDAP and perform actions based on that
+            if ($groupsData['error']) {
+                // Handle error
+            } else {
+                // Handle successful retrieval of groups
+                // exists in Teampass
+                foreach($groupsData['userGroups'] as $key => $group) {
+                    $role_detail = DB::queryFirstRow(
+                        'SELECT a.increment_id as increment_id, a.role_id as role_id, r.title as title
+                        FROM '.prefixTable('ldap_groups_roles').' AS a
+                        INNER JOIN '.prefixTable('roles_title').' AS r ON r.id = a.role_id
+                        WHERE a.ldap_group_id = %s',
+                        $key
+                    );
+                    $counter = DB::count();
+                    
+                    array_push(
+                        $retAD,
+                        [
+                            'ad_group_id' => $key,
+                            'ad_group_title' => $group['ad_group_title'],
+                            'role_id' => ($counter > 0) ? (int) $role_detail['role_id'] : $group['role_id'],
+                            'id' => ($counter > 0) ? (int) $role_detail['increment_id'] : $group['id'],
+                            'role_title' => ($counter > 0) ? $role_detail['title'] : $group['role_title'],
+                        ]
+                    );
+                }
+            }
+            
+            // Get all groups in Teampass
+            $teampassRoles = array();
+            $rows = DB::query('SELECT id,title FROM ' . prefixTable('roles_title'));
+            foreach ($rows as $record) {
+                array_push(
+                    $teampassRoles,
+                    array(
+                        'id' => (int) $record['id'],
+                        'title' => $record['title']
+                    )
+                );
+            }
+
+            echo (string) prepareExchangedData(
                 array(
-                    'allow_pw_change' => filter_input(INPUT_POST, 'value', FILTER_SANITIZE_STRING)
-                ),
-                'id = %i',
-                filter_input(INPUT_POST, 'id', FILTER_SANITIZE_NUMBER_INT)
+                    'error' => false,
+                    'teampass_groups' => $teampassRoles,
+                    'ldap_groups' => $retAD,
+                ), 
+                'encode'
             );
+
             break;
 
-        //-------------------------------------------
-        #CASE change right for a role on a folder via the TM
-        case "change_role_via_tm":
-            // Prepare POST variables
-            $post_access = filter_input(INPUT_POST, 'access', FILTER_SANITIZE_STRING);
-            $post_accessoption = filter_input(INPUT_POST, 'accessoption', FILTER_SANITIZE_STRING);
+        //
+        case "map_role_with_adgroup":
+            // Check KEY
+            if ($post_key !== $session->get('key')) {
+                echo prepareExchangedData(
+                    array(
+                        'error' => true,
+                        'message' => $lang->get('key_is_not_correct'),
+                    ),
+                    'encode'
+                );
+                break;
+            }
 
-            // Loop on selection
-            $arr = explode(",", filter_input(INPUT_POST, 'multiselection', FILTER_SANITIZE_STRING));
-            foreach ($arr as $elem) {
-                $tmp = explode('-', $elem);
-                $folder_id = $tmp[0];
-                $role_id = $tmp[1];
+            // decrypt and retrieve data in JSON format
+            $dataReceived = prepareExchangedData(
+                $post_data,
+                'decode'
+            );
 
-                //get full tree dependencies
-                $tree_list = $tree->getDescendants($folder_id, true);
+            // Prepare variables
+            $post_role_id = filter_var($dataReceived['roleId'], FILTER_SANITIZE_NUMBER_INT);
+            $post_adgroup_id = filter_var($dataReceived['adGroupId'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $post_adgroup_label = filter_var($dataReceived['adGroupLabel'], FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+            $new_id = '';
 
-                if ($post_access === "read" || $post_access === "write" || $post_access === "nodelete") {
-                    // define code to use
-                    if ($post_access == "read") {
-                        $access = "R";
-                    } elseif ($post_access == "write") {
-                        if (empty($post_accessoption) === true) {
-                            $access = "W";
-                        } elseif ($post_accessoption === "nodelete") {
-                            $access = "ND";
-                        } elseif ($post_accessoption === "noedit") {
-                            $access = "NE";
-                        } elseif ($post_accessoption === "nodelete_noedit") {
-                            $access = "NDNE";
-                        }
-                    } else {
-                        $access = "";
-                    }
-
-                    // loop
-                    foreach ($tree_list as $node) {
-                        // delete
-                        DB::delete(prefix_table("roles_values"), "folder_id = %i AND role_id = %i", $node->id, $role_id);
-
-                        //Store in DB
-                        DB::insert(
-                            prefix_table("roles_values"),
+            $data = DB::queryFirstRow(
+                'SELECT *
+                FROM '.prefixTable('ldap_groups_roles').'
+                WHERE ldap_group_id = %s',
+                $post_adgroup_id
+            );
+            
+            if ($data) {
+                // exists in Teampass
+                // update or delete
+                if ((int) $post_role_id === -1) {
+                    // delete
+                    DB::delete(
+                        prefixTable('ldap_groups_roles'),
+                        'increment_id = %i',
+                        $data['increment_id']
+                    );
+                    $new_id = -1;
+                } else {
+                    if (isset($data['increment_id']) === true) {
+                        // update
+                        DB::update(
+                            prefixTable('ldap_groups_roles'),
                             array(
-                                'folder_id' => $node->id,
-                                'role_id' => $role_id,
-                                'type' => $access
-                            )
+                                'role_id' => $post_role_id,
+                            ),
+                            'increment_id = %i',
+                            $data['increment_id']
                         );
                     }
-                } else {
-                    foreach ($tree_list as $node) {
-                        // delete
-                        DB::delete(prefix_table("roles_values"), "folder_id = %i AND role_id = %i", $node->id, $role_id);
-                    }
                 }
-            }
-
-            echo '[ { "error" : "no" } ]';
-            break;
-
-        //-------------------------------------------
-        #CASE refresh the matrix
-        case "refresh_roles_matrix":
-            // Ensure Complexity levels are translated
-            if (isset($SETTINGS_EXT['pwComplexity']) === false) {
-                $SETTINGS_EXT['pwComplexity'] = array(
-                    0=>array(0, $LANG['complex_level0']),
-                    25=>array(25, $LANG['complex_level1']),
-                    50=>array(50, $LANG['complex_level2']),
-                    60=>array(60, $LANG['complex_level3']),
-                    70=>array(70, $LANG['complex_level4']),
-                    80=>array(80, $LANG['complex_level5']),
-                    90=>array(90, $LANG['complex_level6'])
-                );
-            }
-
-            // Prepare POST variables
-            $post_start = filter_input(INPUT_POST, 'start', FILTER_SANITIZE_NUMBER_INT);
-            $post_filter = filter_input(INPUT_POST, 'filter', FILTER_SANITIZE_STRING);
-
-            $tree = $tree->getDescendants();
-            $texte = '<table><thead><tr><th><div>'.addslashes($LANG['groups']).'</div><div>'.
-                '<input type="text" placeholder="'.addslashes($LANG['filter']).'" id="filter_folders" />'.
-                '&nbsp<span class="fa fa-eraser mi-red pointer eraser"></span></div></th>';
-            $gpes_ok = array();
-            $gpes_nok = array();
-            $arrRolesTitle = array();
-            $arrRoles = array();
-            $display_nb = 8;
-            $sql_limit = "";
-            $next = 1;
-            $previous = 1;
-            $where = "";
-
-            // Should we filter on role names
-            if (empty($post_filter) === false) {
-                $where = " WHERE title LIKE '".$post_filter."%'";
-            }
-
-            //count nb of roles
-            $arrUserRoles = array_filter($_SESSION['user_roles']);
-            if (count($arrUserRoles) > 0 && $_SESSION['is_admin'] !== "1") {
-                if (empty($where) === true) {
-                    $where = " WHERE id IN (".implode(',', $arrUserRoles).")";
-                } else {
-                    $where .= " AND id IN (".implode(',', $arrUserRoles).")";
-                }
-            }
-            DB::query("SELECT * FROM ".prefix_table("roles_title").$where);
-            $roles_count = DB::count();
-            if ($roles_count > $display_nb) {
-                if (null === $post_start || intval($post_start) === 0) {
-                    $start = 0;
-                    $previous = 0;
-                } else {
-                    $start = $post_start;
-                    if ($start - $display_nb >= 0) {
-                        $previous = $start - $display_nb;
-                    } else {
-                        $previous = 0;
-                    }
-                }
-                $sql_limit = " LIMIT ".mysqli_real_escape_string($link, filter_var($start, FILTER_SANITIZE_NUMBER_INT)).", ".mysqli_real_escape_string($link, filter_var($display_nb, FILTER_SANITIZE_NUMBER_INT));
-                $next = $start + $display_nb;
-            }
-
-            //Display table header
-            $rows = DB::query(
-                "SELECT * FROM ".prefix_table("roles_title").
-                $where."
-                ORDER BY title ASC".$sql_limit
-            );
-            foreach ($rows as $record) {
-                if ($_SESSION['is_admin'] === '1'
-                    || (($_SESSION['user_manager'] === '1' || $_SESSION['user_can_manage_all_users'] === '1')
-                        && (in_array($record['id'], $arrUserRoles) == true
-                            || $record['creator_id'] == $_SESSION['user_id']
-                        )
+            } else {
+                // Adding new folder is possible as it doesn't exist
+                DB::insert(
+                    prefixTable('ldap_groups_roles'),
+                    array(
+                        'role_id' => $post_role_id,
+                        'ldap_group_id' => $post_adgroup_id,
+                        'ldap_group_label' => $post_adgroup_label,
                     )
-                ) {
-                    if ($record['allow_pw_change'] == 1) {
-                        $allow_pw_change = '&nbsp;<span class=\'fa mi-red fa-2x fa-magic tip\' id=\'img_apcfr_'.$record['id'].'\' onclick=\'allow_pw_change_for_role('.$record['id'].', 0)\' style=\'cursor:pointer;\' title=\''.$LANG['role_cannot_modify_all_seen_items'].'\'></span>';
-                    } else {
-                        $allow_pw_change = '&nbsp;<span class=\'fa fa-magic fa-2x mi-green tip\'  id=\'img_apcfr_'.$record['id'].'\' onclick=\'allow_pw_change_for_role('.$record['id'].', 1)\' style=\'cursor:pointer;\' title=\''.$LANG['role_can_modify_all_seen_items'].'\'></span>';
-                    }
-                    $title = filter_var(htmlspecialchars_decode($record['title'], ENT_QUOTES), FILTER_SANITIZE_STRING);
-
-                    $texte .= '<th style=\'font-size:10px;min-width:60px;\' class=\'edit_role\'>'.
-                        $title.
-                        '<br>'.
-                        '<span class=\'fa fa-pencil fa-2x mi-grey-1\' onclick=\'edit_this_role('.$record['id'].',"'.htmlentities(htmlspecialchars_decode($record['title'], ENT_QUOTES), ENT_QUOTES, "UTF-8").'",'.$record['complexity'].')\' style=\'cursor:pointer;\'></span>&nbsp;'.
-                        '<span class=\'fa fa-trash fa-2x mi-grey-1\' style=\'cursor:pointer;\' onclick=\'delete_this_role('.$record['id'].',"'.htmlentities($record['title'], ENT_QUOTES, "UTF-8").'")\'></span>'.
-                        $allow_pw_change.
-                        '<div style=\'margin-top:-8px;\'>[&nbsp;'.$SETTINGS_EXT['pwComplexity'][$record['complexity']][1].'&nbsp;]</div></th>';
-
-                    array_push($arrRoles, $record['id']);
-                    array_push($arrRolesTitle, $record['title']);
-                }
+                );
+                $new_id = DB::insertId();
             }
-            $texte .= '</tr></thead><tbody>';
 
-            //Display each folder with associated rights by role
-            $i = 0;
-            foreach ($tree as $node) {
-                if (in_array($node->id, $_SESSION['groupes_visibles']) && !in_array($node->id, $_SESSION['personal_visible_groups'])) {
-                    $ident = "";
-                    for ($a = 1; $a < $node->nlevel; $a++) {
-                        $ident .= '<i class=\'fa fa-sm fa-caret-right mi-grey-1\'></i>&nbsp;';
-                    }
-
-                    //display 1st cell of the line
-                    $texte .= '<tr><td style=\'font-size:10px; font-family:arial;\' class="folder-name" title=\'ID='.$node->id.'\'>'.$ident." ".$node->title.'</td>';
-
-                    foreach ($arrRoles as $role) {
-                        //check if this role has access or not
-                        // if not then color is red; if yes then color is green
-                        $role_detail = DB::queryfirstrow("SELECT * FROM ".prefix_table("roles_values")." WHERE folder_id = %i AND role_id = %i", $node->id, $role);
-                        if (DB::count() > 0) {
-                            if ($role_detail['type'] == "W") {
-                                $color = '#008000';
-                                $allowed = "W";
-                                $title = $LANG['write'];
-                                $label = '<i class="fa fa-indent"></i>&nbsp;<i class="fa fa-edit"></i>&nbsp;<i class="fa fa-eraser"></i>';
-                            } elseif ($role_detail['type'] == "ND") {
-                                $color = '#4E45F7';
-                                $allowed = "ND";
-                                $title = $LANG['no_delete'];
-                                $label = '<i class="fa fa-indent"></i>&nbsp;<i class="fa fa-edit"></i>';
-                            } elseif ($role_detail['type'] == "NE") {
-                                $color = '#4E45F7';
-                                $allowed = "NE";
-                                $title = $LANG['no_edit'];
-                                $label = '<i class="fa fa-indent"></i>&nbsp;<i class="fa fa-eraser"></i>';
-                            } elseif ($role_detail['type'] == "NDNE") {
-                                $color = '#4E45F7';
-                                $allowed = "NDNE";
-                                $title = $LANG['no_edit_no_delete'];
-                                $label = '<i class="fa fa-indent"></i>';
-                            } else {
-                                $color = '#FEBC11';
-                                $allowed = "R";
-                                $title = $LANG['read'];
-                                $label = '<i class="fa fa-eye"></i>';
-                            }
-                        } else {
-                            $color = '#FF0000';
-                            $allowed = false;
-                            $title = $LANG['no_access'];
-                            $label = '<i class="fa fa-hand-stop-o"></i>';
-                        }
-                        if (in_array($node->id, $_SESSION['read_only_folders']) || !in_array($node->id, $_SESSION['groupes_visibles'])) {
-                            $texte .= '<td align=\'center\' style=\'text-align:center;background-color:'.$color.'\' id=\'tm_cell_'.$i.'\' title=\''.$title.'\'>'.$label.'</td>';
-                        } else {
-                            $texte .= '<td align=\'center\' style=\'text-align:center;background-color:'.$color.'\' id=\'tm_cell_'.$i.'\' title=\''.$title.'\'><span onclick=\'openRightsDialog('.$role.','.$node->id.','.$i.',"'.$allowed.'")\'>'.$label.'</span><span style=\'float:right;\'><input type=\'checkbox\' title=\'\' class=\'multi_folders\' id=\'multisel_'.$node->id.'_'.$role.'\'></span></td>';
-                        }
-
-
-                        $i++;
-                    }
-                    $texte .= '</tr>';
-                }
-            }
-            $texte .= '</tbody></table>';
-
-            $return_values = array(
-                "new_table" => $texte,
-                "all" => $roles_count,
-                "next" => $next,
-                "previous" => $previous,
-                "list_of_roles" => $arrRolesTitle
+            echo (string) prepareExchangedData(
+                array(
+                    'error' => false,
+                    'newId' => $new_id,
+                ), 
+                'encode'
             );
-
-            $return_values = json_encode($return_values, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
-
-            //return data
-            echo $return_values;
 
             break;
     }
 }
+

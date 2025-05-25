@@ -1,34 +1,61 @@
 <?php
+
+declare(strict_types=1);
+
 /**
- *
- * @package       index.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      index.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
 
-header("X-XSS-Protection: 1; mode=block");
-header("X-Frame-Options: SameOrigin");
+use voku\helper\AntiXSS;
+use TeampassClasses\SessionManager\SessionManager;
+use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
+use TeampassClasses\Language\Language;
+use TeampassClasses\ConfigManager\ConfigManager;
+
+// Security Headers
+header('X-XSS-Protection: 1; mode=block');
+// deepcode ignore TooPermissiveXFrameOptions: Not the case as sameorigin is used
+header('X-Frame-Options: SameOrigin');
+
+// Cache Headers
+header("Cache-Control: no-cache, no-store, must-revalidate");
+header("Pragma: no-cache");
+header("Expires: 0");
 
 // **PREVENTING SESSION HIJACKING**
 // Prevents javascript XSS attacks aimed to steal the session ID
-ini_set('session.cookie_httponly', 1);
-
+//ini_set('session.cookie_httponly', 1);
 // **PREVENTING SESSION FIXATION**
 // Session ID cannot be passed through URLs
-ini_set('session.use_only_cookies', 1);
-
+//ini_set('session.use_only_cookies', 1);
 // Uses a secure connection (HTTPS) if possible
-ini_set('session.cookie_secure', 0);
-
+//ini_set('session.cookie_secure', 0);
+//ini_set('session.cookie_samesite', 'Lax');
 // Before we start processing, we should abort no install is present
-if (!file_exists('includes/config/settings.php')) {
+if (file_exists(__DIR__.'/includes/config/settings.php') === false) {
     // This should never happen, but in case it does
     // this means if headers are sent, redirect will fallback to JS
     if (headers_sent()) {
@@ -37,1052 +64,1436 @@ if (!file_exists('includes/config/settings.php')) {
         header('Location: install/install.php');
     }
     // Now either way, we should stop processing further
-    exit();
+    exit;
 }
 
 // initialise CSRFGuard library
-require_once './includes/libraries/csrfp/libs/csrf/csrfprotector.php';
+require_once __DIR__.'/includes/libraries/csrfp/libs/csrf/csrfprotector.php';
 csrfProtector::init();
-session_id();
 
-// Load config
-if (file_exists('../includes/config/tp.config.php') === true) {
-    include_once '../includes/config/tp.config.php';
-} elseif (file_exists('./includes/config/tp.config.php') === true) {
-    include_once './includes/config/tp.config.php';
-} else {
-    throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
+// Load functions
+require_once __DIR__. '/includes/config/include.php';
+require_once __DIR__.'/sources/main.functions.php';
+
+// init
+loadClasses();
+$session = SessionManager::getSession();
+
+// Random encryption key
+if ($session->get('key') === null)
+    $session->set('key', generateQuickPassword(30, false));
+
+$request = SymfonyRequest::createFromGlobals();
+$configManager = new ConfigManager(__DIR__, $request->getRequestUri());
+$SETTINGS = $configManager->getAllSettings();
+$antiXss = new AntiXSS();
+$session->set('encryptClientServer', (int) $SETTINGS['encryptClientServer'] ?? 1);
+
+// Quick major version check -> upgrade needed?
+if (isset($SETTINGS['teampass_version']) === true && version_compare(TP_VERSION, $SETTINGS['teampass_version']) > 0) {
+    $session->invalidate();
+    // Perform redirection
+    if (headers_sent()) {
+        echo '<script language="javascript" type="text/javascript">document.location.replace("install/install.php");</script>';
+    } else {
+        header('Location: install/upgrade.php');
+    }
+    // No other way, we should stop processing further
+    exit;
 }
 
-// Include files
-require_once $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-require_once $SETTINGS['cpassman_dir'].'/includes/config/include.php';
-require_once $SETTINGS['cpassman_dir'].'/includes/libraries/protect/SuperGlobal/SuperGlobal.php';
-$superGlobal = new protect\SuperGlobal\SuperGlobal();
 
-// initialize session
-$_SESSION['CPM'] = 1;
-if (isset($SETTINGS['cpassman_dir']) === false || $SETTINGS['cpassman_dir'] === "") {
-    $SETTINGS['cpassman_dir'] = ".";
-    $SETTINGS['cpassman_url'] = $superGlobal->get("REQUEST_URI", "SERVER");
-}
-
-// Include files
-require_once $SETTINGS['cpassman_dir'].'/sources/SplClassLoader.php';
-require_once $SETTINGS['cpassman_dir'].'/sources/main.functions.php';
-
-// Open MYSQL database connection
-require_once './includes/libraries/Database/Meekrodb/db.class.php';
-$pass = defuse_return_decrypted($pass);
-DB::$host = $server;
-DB::$user = $user;
-DB::$password = $pass;
-DB::$dbName = $database;
-DB::$port = $port;
-DB::$encoding = $encoding;
-DB::$error_handler = true;
-$link = mysqli_connect($server, $user, $pass, $database, $port);
-$link->set_charset($encoding);
+$SETTINGS = $antiXss->xss_clean($SETTINGS);
 
 // Load Core library
-require_once $SETTINGS['cpassman_dir'].'/sources/core.php';
-
+require_once $SETTINGS['cpassman_dir'] . '/sources/core.php';
 // Prepare POST variables
-$post_language = filter_input(INPUT_POST, 'language', FILTER_SANITIZE_STRING);
-$post_sig_response = filter_input(INPUT_POST, 'sig_response', FILTER_SANITIZE_STRING);
-$post_duo_login = filter_input(INPUT_POST, 'duo_login', FILTER_SANITIZE_STRING);
-$post_duo_pwd = filter_input(INPUT_POST, 'duo_pwd', FILTER_SANITIZE_STRING);
-$post_duo_data = filter_input(INPUT_POST, 'duo_data', FILTER_SANITIZE_STRING);
-$post_login = filter_input(INPUT_POST, 'login', FILTER_SANITIZE_STRING);
-$post_pw = filter_input(INPUT_POST, 'pw', FILTER_SANITIZE_STRING);
+$post_language = filter_input(INPUT_POST, 'language', FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+$session_user_language = $session->get('user-language');
+$session_user_admin = $session->get('user-admin');
+$session_user_human_resources = (int) $session->get('user-can_manage_all_users');
+$session_name = $session->get('user-name');
+$session_lastname = $session->get('user-lastname');
+$session_user_manager = (int) $session->get('user-manager');
+$session_initial_url = $session->get('user-initial_url');
+$session_nb_users_online = $session->get('system-nb_users_online');
+$session_auth_type = $session->get('user-auth_type');
 
-// Prepare superGlobal variables
-$session_user_language = $superGlobal->get("user_language", "SESSION");
-$session_user_id = $superGlobal->get("user_id", "SESSION");
-$session_user_flag = $superGlobal->get("user_language_flag", "SESSION");
-$session_user_admin = $superGlobal->get("user_admin", "SESSION");
-$session_user_human_resources = $superGlobal->get("user_can_manage_all_users", "SESSION");
-$session_user_avatar_thumb = $superGlobal->get("user_avatar_thumb", "SESSION");
-$session_name = $superGlobal->get("name", "SESSION");
-$session_lastname = $superGlobal->get("lastname", "SESSION");
-$session_user_manager = $superGlobal->get("user_manager", "SESSION");
-$session_user_read_only = $superGlobal->get("user_read_only", "SESSION");
-$session_is_admin = $superGlobal->get("is_admin", "SESSION");
-$session_login = $superGlobal->get("login", "SESSION");
-$session_validite_pw = $superGlobal->get("validite_pw", "SESSION");
-$session_nb_folders = $superGlobal->get("nb_folders", "SESSION");
-$session_nb_roles = $superGlobal->get("nb_roles", "SESSION");
-$session_autoriser = $superGlobal->get("autoriser", "SESSION");
-$session_hide_maintenance = $superGlobal->get("hide_maintenance", "SESSION");
-$session_initial_url = $superGlobal->get("initial_url", "SESSION");
-$server_request_uri = $superGlobal->get("REQUEST_URI", "SERVER");
-$session_nb_users_online = $superGlobal->get("nb_users_online", "SESSION");
+$server = [];
+$server['request_uri'] = (string) $request->getRequestUri();
+$server['request_time'] = (int) $request->server->get('REQUEST_TIME');
+
+$get = [];
+$get['page'] = $request->query->get('page') === null ? '' : $antiXss->xss_clean($request->query->get('page'));
+$get['otv'] = $request->query->get('otv') === null ? '' : $antiXss->xss_clean($request->query->get('otv'));
+
+// Avoid blank page and session destroy if user go to index.php without ?page=
+if (empty($get['page']) && !empty($session_name)) {
+    if ($session_user_admin === 1) {
+        $redirect_page = 'admin';
+    } else {
+        $redirect_page = 'items';
+    }
+
+    // Redirect user on default page.
+    header('Location: index.php?page='.$redirect_page);
+    exit();
+}
+
+// Force log of all queries
+// Check if super privilege exists in session
+if (!$session->has('hasSuperPrivilege')) {
+    // Execute query
+    $hasSuperPrivilege = (int) DB::queryFirstField(
+        "SELECT COUNT(*) 
+        FROM information_schema.user_privileges 
+        WHERE GRANTEE = CONCAT(\"'\", CURRENT_USER(), \"'@'localhost'\") 
+        AND PRIVILEGE_TYPE = 'SUPER'"
+    );
+    // Save in session
+    $session->set('hasSuperPrivilege', $hasSuperPrivilege);
+} else {
+    // Get value from session
+    $hasSuperPrivilege = (int) $session->get('hasSuperPrivilege');
+}
+// Enable or not if user has super privilege
+if ($hasSuperPrivilege > 0) {
+    if (defined('MYSQL_LOG') && MYSQL_LOG === true) {
+        DB::query("SET GLOBAL general_log = 'ON'");
+        DB::query("SET GLOBAL general_log_file = " . (defined('MYSQL_LOG_FILE') ? MYSQL_LOG_FILE : "'/var/log/teampass_mysql_query.log'"));
+    } else {
+        DB::query("SET GLOBAL general_log = 'OFF'");
+    }
+}
 
 /* DEFINE WHAT LANGUAGE TO USE */
-if (isset($_GET['language']) === true) {
-    // case of user has change language in the login page
-    $dataLanguage = DB::queryFirstRow(
-        "SELECT flag, name
-        FROM " . prefix_table("languages")."
-        WHERE name = %s",
-        filter_var($_GET['language'], FILTER_SANITIZE_STRING)
-    );
-    $superGlobal->put("user_language", $dataLanguage['name'], "SESSION");
-    $superGlobal->put("user_language_flag", $dataLanguage['flag'], "SESSION");
-} elseif ($session_user_id === null && null === $post_language && $session_user_language === null) {
+if (null === $session->get('user-validite_pw') && $post_language === null && $session_user_language === null) {
     //get default language
     $dataLanguage = DB::queryFirstRow(
-        "SELECT m.valeur AS valeur, l.flag AS flag
-        FROM " . prefix_table("misc")." AS m
-        INNER JOIN " . prefix_table("languages")." AS l ON (m.valeur = l.name)
-        WHERE m.type=%s_type AND m.intitule=%s_intitule",
-        array(
-            'type' => "admin",
-            'intitule' => "default_language",
-        )
+        'SELECT m.valeur AS valeur, l.flag AS flag
+        FROM ' . prefixTable('misc') . ' AS m
+        INNER JOIN ' . prefixTable('languages') . ' AS l ON (m.valeur = l.name)
+        WHERE m.type=%s_type AND m.intitule=%s_intitule',
+        [
+            'type' => 'admin',
+            'intitule' => 'default_language',
+        ]
     );
     if (empty($dataLanguage['valeur'])) {
-        $superGlobal->put("user_language", "english", "SESSION");
-        $superGlobal->put("user_language_flag", "us.png", "SESSION");
-        $session_user_language = "english";
+        $session->set('user-language', 'english');
+        $session->set('user-language_flag', 'us.png');
+        $session_user_language = 'english';
     } else {
-        $superGlobal->put("user_language", $dataLanguage['valeur'], "SESSION");
-        $superGlobal->put("user_language_flag", $dataLanguage['flag'], "SESSION");
+        $session->set('user-language', $dataLanguage['valeur']);
+        $session->set('user-language_flag', $dataLanguage['flag']);
         $session_user_language = $dataLanguage['valeur'];
     }
 } elseif (isset($SETTINGS['default_language']) === true && $session_user_language === null) {
-    $superGlobal->put("user_language", $SETTINGS['default_language'], "SESSION");
+    $session->set('user-language', $SETTINGS['default_language']);
     $session_user_language = $SETTINGS['default_language'];
-} elseif (null !== $post_language) {
-    $superGlobal->put("user_language", $post_language, "SESSION");
+} elseif ($post_language !== null) {
+    $session->set('user-language', $post_language);
     $session_user_language = $post_language;
 } elseif ($session_user_language === null || empty($session_user_language) === true) {
-    if (null !== $post_language) {
-        $superGlobal->put("user_language", $post_language, "SESSION");
+    if ($post_language !== null) {
+        $session->set('user-language', $post_language);
         $session_user_language = $post_language;
     } elseif ($session_user_language !== null) {
-        $superGlobal->put("user_language", $SETTINGS['default_language'], "SESSION");
+        $session->set('user-language', $SETTINGS['default_language']);
         $session_user_language = $SETTINGS['default_language'];
     }
-} elseif ($session_user_language === '0') {
-    $superGlobal->put("user_language", $SETTINGS['default_language'], "SESSION");
-    $session_user_language = $SETTINGS['default_language'];
+}
+$lang = new Language($session_user_language, __DIR__. '/includes/language/'); 
+
+if (isset($SETTINGS['cpassman_dir']) === false || $SETTINGS['cpassman_dir'] === '') {
+    $SETTINGS['cpassman_dir'] = __DIR__;
+    $SETTINGS['cpassman_url'] = (string) $server['request_uri'];
 }
 
-if (isset($SETTINGS['cpassman_dir']) === false || $SETTINGS['cpassman_dir'] === "") {
-    $SETTINGS['cpassman_dir'] = ".";
-    $SETTINGS['cpassman_url'] = (string) $server_request_uri;
+// Get the URL
+$cpassman_url = isset($SETTINGS['cpassman_url']) ? $SETTINGS['cpassman_url'] : '';
+// URL validation
+if (!filter_var($cpassman_url, FILTER_VALIDATE_URL)) {
+    $cpassman_url = '';
 }
+// Sanitize the URL to prevent XSS
+$cpassman_url = htmlspecialchars($cpassman_url, ENT_QUOTES, 'UTF-8');
 
-// Load user languages files
-if (in_array($session_user_language, $languagesList) === true) {
-    if (file_exists($SETTINGS['cpassman_dir'].'/includes/language/'.$session_user_language.'.php') === true) {
-        include_once $SETTINGS['cpassman_dir'].'/includes/language/'.$session_user_language.'.php';
-    }
+// Some template adjust
+if (array_key_exists($get['page'], $mngPages) === true) {
+    $menuAdmin = true;
 } else {
-    $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-    include $SETTINGS['cpassman_dir'].'/error.php';
+    $menuAdmin = false;
 }
 
-// load 2FA Google
-if (isset($SETTINGS['google_authentication']) === true && $SETTINGS['google_authentication'] === "1") {
-    include_once $SETTINGS['cpassman_dir']."/includes/libraries/Authentication/TwoFactorAuth/TwoFactorAuth.php";
+// Some template adjust
+if (array_key_exists($get['page'], $utilitiesPages) === true) {
+    $menuUtilities = true;
+} else {
+    $menuUtilities = false;
 }
 
-// load 2FA Yubico
-if (isset($SETTINGS['yubico_authentication']) === true && $SETTINGS['yubico_authentication'] === "1") {
-    include_once $SETTINGS['cpassman_dir']."/includes/libraries/Authentication/Yubico/Yubico.php";
+// Get the favicon
+$favicon = isset($SETTINGS['favicon']) ? $SETTINGS['favicon'] : '';
+// URL Validation
+if (!filter_var($favicon, FILTER_VALIDATE_URL)) {
+    $favicon = '';
 }
+// Sanitize the URL to prevent XSS
+$favicon = htmlspecialchars($favicon, ENT_QUOTES, 'UTF-8');
 
-// Load links, css and javascripts
-if (isset($_SESSION['CPM']) === true && isset($SETTINGS['cpassman_dir']) === true) {
-    include_once $SETTINGS['cpassman_dir'].'/load.php';
-}
+// Define the date and time format
+$date_format = isset($SETTINGS['date_format']) ? $SETTINGS['date_format'] : 'Y-m-d';
+$time_format = isset($SETTINGS['time_format']) ? $SETTINGS['time_format'] : 'H:i:s';
+
+// Force dark theme on page generation
+$theme = $_COOKIE['teampass_theme'] ?? 'light';
+$theme_body = $theme === 'dark' ? 'dark-mode' : '';
+$theme_meta = $theme === 'dark' ? '#343a40' : '#fff';
+$theme_navbar = $theme === 'dark' ? 'navbar-dark' : 'navbar-white navbar-light';
 
 ?>
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Transitional//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'>
 
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en' lang='en'>
+
 <head>
-<meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
-<meta http-equiv="X-UA-Compatible" content="IE=edge">
-<title>Teampass</title>
-<script type="text/javascript">
-    //<![CDATA[
-    if (window.location.href.indexOf("page=") == -1 && (window.location.href.indexOf("otv=") == -1 && window.location.href.indexOf("action=") == -1)) {
-        if (window.location.href.indexOf("session_over=true") == -1) {
-            //location.replace("./index.php?page=items");
-        } else {
-            location.replace("./logout.php");
+    <meta http-equiv='Content-Type' content='text/html;charset=utf-8' />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="x-ua-compatible" content="ie=edge" />
+    <meta name="theme-color" content="<?php echo $theme_meta; ?>" />
+    <title><?php echo $configManager->getSetting('teampass_title') ?? 'Teampass'; ?></title>
+    <script type='text/javascript'>
+        //<![CDATA[
+        if (window.location.href.indexOf('page=') === -1 &&
+            (window.location.href.indexOf('otv=') === -1 &&
+                window.location.href.indexOf('action=') === -1)
+        ) {
+            if (window.location.href.indexOf('session_over=true') !== -1) {
+                location.replace('./includes/core/logout.php');
+            }
         }
-    }
-    //]]>
-</script>
-<?php
+        //]]>
+    </script>
 
-// load HEADERS
-if (isset($_SESSION['CPM']) === true) {
-    echo $htmlHeaders;
-}
-?>
-    </head>
-
-<body>
+    <!-- IonIcons -->
+    <link rel="stylesheet" href="includes/css/ionicons.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <!-- Theme style -->
+    <link rel="stylesheet" href="plugins/adminlte/css/adminlte.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <link rel="stylesheet" href="plugins/pace-progress/themes/corner-indicator.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/css" />
+    <link rel="stylesheet" href="plugins/select2/css/select2.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/css" />
+    <link rel="stylesheet" href="plugins/select2/theme/select2-bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/css" />
+    <!-- Theme style -->
+    <link rel="stylesheet" href="includes/css/teampass.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <!-- Google Font: Source Sans Pro -->
+    <link rel="stylesheet" type="text/css" href="includes/fonts/fonts.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <!-- Altertify -->
+    <link rel="stylesheet" href="plugins/alertifyjs/css/alertify.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+    <link rel="stylesheet" href="plugins/alertifyjs/css/themes/bootstrap.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+    <!-- Toastr -->
+    <link rel="stylesheet" href="plugins/toastr/toastr.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+    <!-- favicon -->
+    <link rel="shortcut icon" type="image/png" href="<?php echo $favicon;?>"/>
+    <!-- manifest (PWA) -->
+    <link rel="manifest" href="manifest.json?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <!-- Custom style -->
     <?php
-    
-/* HEADER */
-echo '
-    <div id="top">
-        <div id="logo"><img src="includes/images/canevas/logo.png" alt="" /></div>';
-// Display menu
-if (empty($session_login) === false) {
-    // welcome message
-    echo '
-        <div style="float:right; margin:-10px 5px 0 0; color:#FFF;">'
-    . $LANG['index_welcome'].'&nbsp;<b>'.$session_name.'&nbsp;'.$session_lastname
-    . '&nbsp;['.$session_login.']</b>&nbsp;-&nbsp;'
-    , $session_user_admin === '1' ? $LANG['god'] : (
-        $session_user_manager === '1' ? $LANG['gestionnaire'] : (
-            $session_user_read_only === '1' ? $LANG['read_only_account'] : ($session_user_human_resources === '1' ? $LANG['human_resources'] : $LANG['user'])
-        )
-    ), '&nbsp;'.strtolower($LANG['index_login']).'</div>';
+    if (file_exists(__DIR__ . '/includes/css/custom.css') === true) {?>
+        <link rel="stylesheet" href="includes/css/custom.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <?php
+    } ?>
+</head>
 
-    echo '
-        <div id="menu_top">
-            <div style="margin-left:20px; margin-top:2px;width:710px;" id="main_menu">';
-    if ($session_user_admin === '0' || $SETTINGS_EXT['admin_full_right'] == 0) {
-        echo '
-                <a class="btn btn-default" href="#"',
-        ($session_nb_folders !== null && intval($session_nb_folders) === 0)
-        || ($session_nb_roles !== null && intval($session_nb_roles) === 0) ? '' : ' onclick="MenuAction(\'items\')"',
-        '>
-                    <i class="fa fa-key fa-2x tip" title="' . $LANG['pw'].'"></i>
+
+
+
+<?php
+// display an item in the context of OTV link
+if ((null === $session->get('user-validite_pw') || empty($session->get('user-validite_pw')) === true || empty($session->get('user-id')) === true)
+    && empty($get['otv']) === false)
+{
+    include './includes/core/otv.php';
+    exit;
+} elseif ($session->has('user-validite_pw') && null !== $session->get('user-validite_pw') && ($session->get('user-validite_pw') === 0 || $session->get('user-validite_pw') === 1)
+    && empty($get['page']) === false && empty($session->get('user-id')) === false
+) {
+    ?>
+    <body class="hold-transition sidebar-mini layout-navbar-fixed layout-fixed <?php echo $theme_body; ?>">
+        <div class="wrapper">
+
+            <!-- Navbar -->
+            <nav class="main-header navbar navbar-expand <?php echo $theme_navbar ?>">
+                <!-- User encryption still ongoing -->
+                <div id="user_not_ready" class="alert alert-warning hidden pointer p-2 mt-2" style="position:absolute; left:200px;">
+                    <span class="align-middle infotip ml-2" title="<?php echo $lang->get('keys_encryption_not_ready'); ?>"><?php echo $lang->get('account_not_ready'); ?><span id="user_not_ready_progress"></span><i class="fa-solid fa-hourglass-half fa-beat-fade mr-2 ml-2"></i></span>
+                </div>
+
+                <!-- Left navbar links -->
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" data-widget="pushmenu" href="#"><i class="fa-solid fa-bars"></i></a>
+                    </li>
+                </ul>
+
+                <!-- Right navbar links -->
+                <ul class="navbar-nav ml-auto">
+                    <span class="fa-stack infotip pointer hidden mr-2" title="<?php echo $lang->get('get_your_recovery_keys'); ?>" id="open_user_keys_management" style="vertical-align: top;">
+                        <i class="fa-solid fa-circle text-danger fa-stack-2x"></i>
+                        <i class="fa-solid fa-bell fa-shake fa-stack-1x fa-inverse"></i>
+                    </span>
+                    <!-- Messages Dropdown Menu -->
+                    <li class="nav-item dropdown">
+                        <div class="dropdown show">
+                            <a class="btn btn-primary dropdown-toggle" href="#" data-toggle="dropdown">
+                                <?php
+                                    echo $session_name . '&nbsp;' . $session_lastname; ?>
+                            </a>
+
+                            <div class="dropdown-menu dropdown-menu-right">
+                                <a class="dropdown-item user-menu" href="#" data-name="increase_session">
+                                    <i class="far fa-clock fa-fw mr-2"></i><?php echo $lang->get('index_add_one_hour'); ?></a>
+                                <div class="dropdown-divider"></div>
+                                <a class="dropdown-item user-menu" href="#" data-name="profile">
+                                    <i class="fa-solid fa-user-circle fa-fw mr-2"></i><?php echo $lang->get('my_profile'); ?>
+                                </a>
+                                <?php
+                                    if (empty($session_auth_type) === false && $session_auth_type !== 'ldap' && $session_auth_type !== 'oauth2') {
+                                        ?>
+                                    <a class="dropdown-item user-menu" href="#" data-name="password-change">
+                                        <i class="fa-solid fa-lock fa-fw mr-2"></i><?php echo $lang->get('index_change_pw'); ?>
+                                    </a>
+                                <?php
+                                    } elseif ($session_auth_type === 'ldap') {
+                                        ?>
+                                    <a class="dropdown-item user-menu" href="#" data-name="sync-new-ldap-password">
+                                        <i class="fa-solid fa-key fa-fw mr-2"></i><?php echo $lang->get('sync_new_ldap_password'); ?>
+                                    </a>
+                                <?php
+                                    } ?>
+                                <a class="dropdown-item user-menu<?php echo (int) $session_user_admin === 1 ? ' hidden' : '';?>" href="#" data-name="generate-new_keys">
+                                    <i class="fa-solid fa-spray-can-sparkles fa-fw mr-2"></i><?php echo $lang->get('generate_new_keys'); ?>
+                                </a>
+
+                                <!--
+                                <div class="dropdown-divider"></div>
+                                <a class="dropdown-item user-menu" href="#" data-name="generate-an-otp">
+                                    <i class="fa-solid fa-qrcode fa-fw mr-2"></i><?php echo $lang->get('generate_an_otp'); ?>
+                                </a>
+                                -->
+
+                                <div class="dropdown-divider"></div>
+                                <a class="dropdown-item user-menu" href="#" data-name="logout">
+                                    <i class="fa-solid fa-sign-out-alt fa-fw mr-2"></i><?php echo $lang->get('disconnect'); ?>
+                                </a>
+                            </div>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="align-middle infotip ml-2 text-info" title="<?php echo $lang->get('index_expiration_in'); ?>" id="countdown"></span>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-widget="control-sidebar" data-slide="true" href="#" id="controlsidebar"><i class="fa-solid fa-th-large"></i></a>
+                    </li>
+                    <li id="switch-theme" class="nav-item pointer">
+                        <i class="fa-solid fa-circle-half-stroke m-2 m-2"></i>
+                    </li>
+                </ul>
+            </nav>
+            <!-- /.navbar -->
+
+            <!-- Main Sidebar Container -->
+            <aside class="main-sidebar sidebar-dark-primary elevation-4">
+                <!-- Brand Logo -->
+                <a href="<?php echo $cpassman_url . '/index.php?page=' . ((int) $session_user_admin === 1 ? 'admin' : 'items'); ?>" class="brand-link">
+                    <img src="includes/images/teampass-logo2-home.png" alt="Teampass Logo" class="brand-image">
+                    <span class="brand-text font-weight-light"><?php echo TP_TOOL_NAME; ?></span>
                 </a>
 
-                <a class="btn btn-default" href="#"',
-        ($session_nb_folders !== null && intval($session_nb_folders) === 0)
-        || ($session_nb_roles !== null && intval($session_nb_roles) === 0) ? '' : ' onclick="MenuAction(\'find\')"',
-            '>
-                    <i class="fa fa-binoculars fa-2x tip" title="' . $LANG['find'].'"></i>
-                </a>';
+                <!-- Sidebar -->
+                <div class="sidebar">
+                    <!-- Sidebar Menu -->
+                    <nav class="mt-2" style="margin-bottom:40px;">
+                        <ul class="nav nav-pills nav-sidebar flex-column" data-widget="treeview" role="menu" data-accordion="false">
+                            <?php
+                                if ($session_user_admin === 0) {
+                                    // ITEMS & SEARCH
+                                    echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="items" class="nav-link', $get['page'] === 'items' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-key"></i>
+                        <p>
+                            ' . $lang->get('pw') . '
+                        </p>
+                        </a>
+                    </li>';
+                                }
+
+    // IMPORT menu
+    if (isset($SETTINGS['allow_import']) === true && (int) $SETTINGS['allow_import'] === 1 && (int) $session_user_admin === 0) {
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="import" class="nav-link', $get['page'] === 'import' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-file-import"></i>
+                        <p>
+                            ' . $lang->get('import') . '
+                        </p>
+                        </a>
+                    </li>';
+    }
+    // EXPORT menu
+    if (
+                                    isset($SETTINGS['allow_print']) === true && (int) $SETTINGS['allow_print'] === 1
+                                    && isset($SETTINGS['roles_allowed_to_print_select']) === true
+                                    && empty($SETTINGS['roles_allowed_to_print_select']) === false
+                                    && count(array_intersect(
+                                        explode(';', $session->get('user-roles')),
+                                        explode(',', str_replace(['"', '[', ']'], '', $SETTINGS['roles_allowed_to_print_select']))
+                                    )) > 0
+                                    && (int) $session_user_admin === 0
+                                ) {
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="export" class="nav-link', $get['page'] === 'export' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-file-export"></i>
+                        <p>
+                            ' . $lang->get('export') . '
+                        </p>
+                        </a>
+                    </li>';
+    }
+
+    /*
+    // OFFLINE MODE menu
+    if (isset($SETTINGS['settings_offline_mode']) === true && (int) $SETTINGS['settings_offline_mode'] === 1) {
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="offline" class="nav-link', $get['page'] === 'offline' ? ' active' : '' ,'">
+                        <i class="nav-icon fa-solid fa-plug"></i>
+                        <p>
+                            '.$lang->get('offline').'
+                        </p>
+                        </a>
+                    </li>';
+    }
+    */
+
+    if ($session_user_admin === 0) {
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="search" class="nav-link', $get['page'] === 'search' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-search"></i>
+                        <p>
+                            ' . $lang->get('find') . '
+                        </p>
+                        </a>
+                    </li>';
     }
 
     // Favourites menu
-    if (isset($SETTINGS['enable_favourites'])
-        && $SETTINGS['enable_favourites'] == 1
-        &&
-        ($session_user_admin === '0' || ($session_user_admin === '1' && $SETTINGS_EXT['admin_full_right'] === false))
-    ) {
+    if (
+                                    isset($SETTINGS['enable_favourites']) === true && (int) $SETTINGS['enable_favourites'] === 1
+                                    && (int) $session_user_admin === 0
+                                ) {
         echo '
-                    <a class="btn btn-default" href="#" onclick="MenuAction(\'favourites\')">
-                        <i class="fa fa-star fa-2x tip" title="' . $LANG['my_favourites'].'"></i>
-                    </a>';
+                    <li class="nav-item">
+                        <a href="#" data-name="favourites" class="nav-link', $get['page'] === 'favourites' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-star"></i>
+                        <p>
+                            ' . $lang->get('favorites') . '
+                        </p>
+                        </a>
+                    </li>';
     }
-    // KB menu
-    if (isset($SETTINGS['enable_kb']) && $SETTINGS['enable_kb'] == 1) {
-        echo '
-                    <a class="btn btn-default" href="#" onclick="MenuAction(\'kb\')">
-                        <i class="fa fa-map-signs fa-2x tip" title="' . $LANG['kb_menu'].'"></i>
-                    </a>';
-    }
-    echo '
-        <span id="menu_suggestion_position">';
+    /*
+        // KB menu
+        if (isset($SETTINGS['enable_kb']) === true && $SETTINGS['enable_kb'] === '1'
+        ) {
+            echo '
+                        <li class="nav-item">
+                            <a href="#" data-name="kb" class="nav-link', $get['page'] === 'kb' ? ' active' : '' ,'">
+                            <i class="nav-icon fa-solid fa-map-signs"></i>
+                            <p>
+    '.$lang->get('kb_menu').'
+                            </p>
+                            </a>
+                        </li>';
+        }
+    */
     // SUGGESTION menu
-    if (isset($SETTINGS['enable_suggestion']) === true && $SETTINGS['enable_suggestion'] === '1'
-        && ($session_user_admin === '1' || $session_user_manager === '1')
-        // Removed this condition in previous $session_user_read_only === '1' || 
+    if (
+                                    isset($SETTINGS['enable_suggestion']) && (int) $SETTINGS['enable_suggestion'] === 1
+                                    && $session_user_manager === 1
+                                ) {
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="suggestion" class="nav-link', $get['page'] === 'suggestion' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-lightbulb"></i>
+                        <p>
+                            ' . $lang->get('suggestion_menu') . '
+                        </p>
+                        </a>
+                    </li>';
+    }
+
+    // Admin menu
+    if ($session_user_admin === 1) {
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="admin" class="nav-link', $get['page'] === 'admin' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-info"></i>
+                        <p>
+                            ' . $lang->get('admin_main') . '
+                        </p>
+                        </a>
+                    </li>
+                    <li class="nav-item has-treeview', $menuAdmin === true ? ' menu-open' : '', '">
+                        <a href="#" class="nav-link">
+                            <i class="nav-icon fa-solid fa-wrench"></i>
+                            <p>
+                                ' . $lang->get('admin_settings') . '
+                                <i class="fa-solid fa-angle-left right"></i>
+                            </p>
+                        </a>
+                        <ul class="nav-item nav-treeview">
+                            <li class="nav-item">
+                                <a href="#" data-name="options" class="nav-link', $get['page'] === 'options' ? ' active' : '', '">
+                                    <i class="fa-solid fa-check-double nav-icon"></i>
+                                    <p>' . $lang->get('options') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="2fa" class="nav-link', $get['page'] === '2fa' ? ' active' : '', '">
+                                    <i class="fa-solid fa-qrcode nav-icon"></i>
+                                    <p>' . $lang->get('mfa_short') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="api" class="nav-link', $get['page'] === 'api' ? ' active' : '', '">
+                                    <i class="fa-solid fa-cubes nav-icon"></i>
+                                    <p>' . $lang->get('api') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="backups" class="nav-link', $get['page'] === 'backups' ? ' active' : '', '">
+                                    <i class="fa-solid fa-database nav-icon"></i>
+                                    <p>' . $lang->get('backups') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="emails" class="nav-link', $get['page'] === 'emails' ? ' active' : '', '">
+                                    <i class="fa-solid fa-envelope nav-icon"></i>
+                                    <p>' . $lang->get('emails') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="fields" class="nav-link', $get['page'] === 'fields' ? ' active' : '', '">
+                                    <i class="fa-solid fa-keyboard nav-icon"></i>
+                                    <p>' . $lang->get('fields') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="ldap" class="nav-link', $get['page'] === 'ldap' ? ' active' : '', '">
+                                    <i class="fa-solid fa-id-card nav-icon"></i>
+                                    <p>' . $lang->get('ldap') . '</p>
+                                </a>
+                            </li>
+
+                            <li class="nav-item">
+                                <a href="#" data-name="oauth" class="nav-link', $get['page'] === 'oauth' ? ' active' : '', '">
+                                    <i class="fa-solid fa-plug nav-icon"></i>
+                                    <p>' . $lang->get('oauth') . '</p>
+                                </a>
+                            </li>
+                            
+                            <li class="nav-item">
+                                <a href="#" data-name="uploads" class="nav-link', $get['page'] === 'uploads' ? ' active' : '', '">
+                                    <i class="fa-solid fa-file-upload nav-icon"></i>
+                                    <p>' . $lang->get('uploads') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="statistics" class="nav-link', $get['page'] === 'statistics' ? ' active' : '', '">
+                                    <i class="fa-solid fa-chart-bar nav-icon"></i>
+                                    <p>' . $lang->get('statistics') . '</p>
+                                </a>
+                            </li>
+                        </ul>
+                    </li>';
+
+        if (isset($SETTINGS['enable_tasks_manager']) && (int) $SETTINGS['enable_tasks_manager'] === 1) {
+            echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="tasks" class="nav-link', $get['page'] === 'tasks' ? ' active' : '', '">
+                        <i class="fa-solid fa-tasks nav-icon"></i>
+                        <p>' . $lang->get('tasks') . '</p>
+                        </a>
+                    </li>';
+        }
+        
+        if (WIP === true) {
+            echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="tools" class="nav-link', $get['page'] === 'tools' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-person-drowning"></i>
+                        <p>
+                            ' . $lang->get('tools') . '
+                        </p>
+                        </a>
+                    </li>';
+        }
+        echo '
+                    <li class="nav-item">
+                        <a href="#" data-name="import" class="nav-link', $get['page'] === 'import' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-file-import"></i>
+                        <p>
+                            ' . $lang->get('import') . '
+                        </p>
+                        </a>
+                    </li>';
+    }
+
+    if (
+        $session_user_admin === 1
+        || $session_user_manager === 1
+        || $session_user_human_resources === 1
     ) {
         echo '
-                <a class="btn btn-default" href="#" onclick="MenuAction(\'suggestion\')">
-                    <i class="fa fa-lightbulb-o fa-2x tip" id="menu_icon_suggestions" title="' . $LANG['suggestion_menu'].'"></i>
-                </a>';
-    }
-    echo '
-        </span>';
-    // Admin menu
-    if ($session_user_admin === '1') {
+                    <li class="nav-item">
+                        <a href="#" data-name="folders" class="nav-link', $get['page'] === 'folders' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-folder-open"></i>
+                        <p>
+                            ' . $lang->get('folders') . '
+                        </p>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#" data-name="roles" class="nav-link', $get['page'] === 'roles' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-graduation-cap"></i>
+                        <p>
+                            ' . $lang->get('roles') . '
+                        </p>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#" data-name="users" class="nav-link', $get['page'] === 'users' ? ' active' : '', '">
+                        <i class="nav-icon fa-solid fa-users"></i>
+                        <p>
+                            ' . $lang->get('users') . '
+                        </p>
+                        </a>
+                    </li>
+                    <li class="nav-item has-treeview', $menuUtilities === true ? ' menu-open' : '', '">
+                        <a href="#" class="nav-link">
+                        <i class="nav-icon fa-solid fa-cubes"></i>
+                        <p>' . $lang->get('admin_views') . '<i class="fa-solid fa-angle-left right"></i></p>
+                        </a>
+                        <ul class="nav nav-treeview">
+                            <li class="nav-item">
+                                <a href="#" data-name="utilities.renewal" class="nav-link', $get['page'] === 'utilities.renewal' ? ' active' : '', '">
+                                <i class="far fa-calendar-alt nav-icon"></i>
+                                <p>' . $lang->get('renewal') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="utilities.deletion" class="nav-link', $get['page'] === 'utilities.deletion' ? ' active' : '', '">
+                                <i class="fa-solid fa-trash-alt nav-icon"></i>
+                                <p>' . $lang->get('deletion') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="utilities.logs" class="nav-link', $get['page'] === 'utilities.logs' ? ' active' : '', '">
+                                <i class="fa-solid fa-history nav-icon"></i>
+                                <p>' . $lang->get('logs') . '</p>
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" data-name="utilities.database" class="nav-link', $get['page'] === 'utilities.database' ? ' active' : '', '">
+                                <i class="fa-solid fa-database nav-icon"></i>
+                                <p>' . $lang->get('database') . '</p>
+                                </a>
+                            </li>
+                        </ul>
+                    </li>';
+    } ?>
+                        </ul>
+                    </nav>
+                    <!-- /.sidebar-menu -->
+                <div class="menu-footer">
+                    <div class="" id="sidebar-footer">
+                        <i class="fa-solid fa-clock-o mr-2 infotip text-info pointer" title="<?php echo htmlspecialchars($lang->get('server_time') . ' ' .
+                            date($date_format, (int) $server['request_time']) . ' - ' .
+                            date($time_format, (int) $server['request_time']), ENT_QUOTES, 'UTF-8'); ?>"></i>
+                        <i class="fa-solid fa-users mr-2 infotip text-info pointer" title="<?php echo $session_nb_users_online . ' ' . $lang->get('users_online'); ?>"></i>
+                        <a href="<?php echo DOCUMENTATION_URL; ?>" target="_blank" class="text-info"><i class="fa-solid fa-book mr-2 infotip" title="<?php echo $lang->get('documentation_canal'); ?>"></i></a>
+                        <a href="<?php echo HELP_URL; ?>" target="_blank" class="text-info"><i class="fa-solid fa-life-ring mr-2 infotip" title="<?php echo $lang->get('admin_help'); ?>"></i></a>
+                        <?php if ($session_user_admin === 1) : ?><i class="fa-solid fa-bug infotip pointer text-info" title="<?php echo $lang->get('bugs_page'); ?>" onclick="generateBugReport()"></i><?php endif; ?>
+                    </div>
+                    <?php
+    ?>
+                </div>
+                </div>
+                <!-- /.sidebar -->
+            </aside>
+
+            <!-- Content Wrapper. Contains page content -->
+            <div class="content-wrapper">
+
+                <!-- DEFECT REPORT -->
+                <div class="card card-danger m-2 hidden" id="dialog-bug-report">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bug mr-2"></i>
+                            <?php echo $lang->get('defect_report'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-2 alert alert-info">
+                                    <i class="icon fa-solid fa-info mr-2"></i>
+                                    <?php echo $lang->get('bug_report_to_github'); ?>
+                                </div>
+                                <textarea class="form-control" style="min-height:300px;" id="dialog-bug-report-text" placeholder="<?php echo $lang->get('please_wait_while_loading'); ?>"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary mr-2 clipboard-copy" data-clipboard-text="dialog-bug-report-text" id="dialog-bug-report-select-button"><?php echo $lang->get('copy_to_clipboard'); ?></button>
+                        <button class="btn btn-primary" id="dialog-bug-report-github-button"><?php echo $lang->get('open_bug_report_in_github'); ?></button>
+                        <button class="btn btn-default float-right close-element"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.DEFECT REPORT -->
+
+
+                <!-- USER CHANGE AUTH PASSWORD -->
+                <div class="card card-warning m-3 hidden" id="dialog-user-change-password">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-5 alert alert-info" id="dialog-user-change-password-info">
+                                    <i class="icon fa-solid fa-info mr-2"></i>
+                                    <?php echo $lang->get('user_password_policy_tip'); ?>
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('provide_your_current_password'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="profile-current-password">
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('index_new_pw'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="profile-password">
+                                    <div class="input-group-append" style="margin: 0px;">
+                                        <span class="input-group-text" id="profile-password-strength"></span>
+                                        <input type="hidden" id="profile-password-complex" />
+                                    </div>
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('index_change_pw_confirmation'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="profile-password-confirm">
+                                </div>
+                                <div class="form-control mt-3 font-weight-light grey" id="dialog-user-change-password-progress">
+                                    <?php echo $lang->get('provide_current_psk_and_click_launch'); ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary" id="dialog-user-change-password-do"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="dialog-user-change-password-close"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.USER CHANGE AUTH PASSWORD -->
+
+
+                <!-- LDAP USER HAS CHANGED AUTH PASSWORD -->
+                <div class="card card-warning m-3 hidden" id="dialog-ldap-user-change-password">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-5 alert alert-info hidden" id="dialog-ldap-user-change-password-info">
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('provide_your_previous_password'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="dialog-ldap-user-change-password-old">
+                                </div>
+                                <div class="input-group mb-3"  id="new-password-field">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('provide_your_current_password'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="dialog-ldap-user-change-password-current">
+                                </div>
+                                <div class="form-control mt-3 font-weight-light grey" id="dialog-ldap-user-change-password-progress">
+                                    <?php echo $lang->get('provide_current_psk_and_click_launch'); ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary" id="dialog-ldap-user-change-password-do"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="dialog-ldap-user-change-password-close"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.LDAP USER HAS CHANGED AUTH PASSWORD -->
+
+
+                <!-- ADMIN ASKS FOR USER PASSWORD CHANGE -->
+                <div class="card card-warning m-3 hidden" id="dialog-admin-change-user-password">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-2 alert alert-info" id="dialog-admin-change-user-password-info">
+                                </div>
+                                <div class="form-control mt-3 font-weight-light grey" id="dialog-admin-change-user-password-progress">
+                                    <?php echo $lang->get('provide_current_psk_and_click_launch'); ?>
+                                </div>
+                                <div class="mt-3">                                    
+                                    <label>
+                                        <span class="mr-2 pointer fw-normal"><i class="fa-solid fa-eye mr-2 text-orange"></i><?php echo $lang->get('show_user_password');?></span>
+                                        <input type="checkbox" id="dialog-admin-change-user-password-do-show-password" class="pointer">
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <input type="hidden" id="admin_change_user_password_target_user" value="">
+                        <input type="hidden" id="admin_change_user_encryption_code_target_user" value="">
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary mr-3" id="dialog-admin-change-user-password-do"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="dialog-admin-change-user-password-close"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.ADMIN ASKS FOR USER PASSWORD CHANGE -->
+
+
+                <!-- USER PROVIDES TEMPORARY CODE -->
+                <div class="card card-warning m-3 hidden" id="dialog-user-temporary-code">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-5 alert alert-info" id="dialog-user-temporary-code-info">
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('provide_your_current_password'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="dialog-user-temporary-code-current-password">
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('temporary_encryption_code'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="dialog-user-temporary-code-value">
+                                </div>
+                                <div class="form-control mt-3 font-weight-light grey" id="dialog-user-temporary-code-progress">
+                                    <?php echo $lang->get('provide_current_psk_and_click_launch'); ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary" id="dialog-user-temporary-code-do"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="dialog-user-temporary-code-close"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.USER PROVIDES TEMPORARY CODE -->
+
+
+                <!-- ENCRYPTION KEYS GENERATION -->
+                <div class="card card-warning m-3 mt-3 hidden" id="dialog-encryption-keys">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-2 alert alert-info" id="warning-text-reencryption">
+                                    <i class="icon fa-solid fa-info mr-2"></i>
+                                    <?php echo $lang->get('objects_encryption_explanation'); ?>
+                                </div>
+                            </div>
+                        </div>
+                        <input type="hidden" id="sharekeys_reencryption_target_user" value="">
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary" id="button_do_sharekeys_reencryption"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="button_close_sharekeys_reencryption"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.ENCRYPTION KEYS GENERATION -->
+
+
+                <!-- ENCRYPTION KEYS GENERATION FOR LDAP NEW USER -->
+                <div class="card card-warning m-3 mt-3 hidden" id="dialog-ldap-user-build-keys-database">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-2 alert alert-info" id="warning-text-reencryption">
+                                    <i class="icon fa-solid fa-info mr-2"></i>
+                                    <?php echo $lang->get('help_for_launching_items_encryption'); ?>
+                                </div>
+
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('temporary_encryption_code'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="dialog-ldap-user-build-keys-database-code">
+                                    <br/>
+                                </div>
+                                <div class="input-group mb-3<?php if ($session_auth_type === 'oauth2') echo ' hidden'; ?>">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('provide_your_current_password'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="dialog-ldap-user-build-keys-database-userpassword">
+                                </div>
+                                
+                                <div class="form-control mt-3 font-weight-light grey" id="dialog-ldap-user-build-keys-database-progress">
+                                    <?php echo $lang->get('provide_current_psk_and_click_launch'); ?>
+                                </div>
+                            </div>
+                        </div>
+                        <input type="hidden" id="sharekeys_reencryption_target_user" value="">
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary" id="dialog-ldap-user-build-keys-database-do"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="dialog-ldap-user-build-keys-database-close"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.ENCRYPTION KEYS GENERATION -->
+
+                <!-- ENCRYPTION PERSONAL ITEMS GENERATION -->
+                <div class="card card-warning m-3 hidden" id="dialog-encryption-personal-items-after-upgrade">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fa-solid fa-bullhorn mr-2"></i>
+                            <?php echo $lang->get('your_attention_is_required'); ?>
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-sm-12 col-md-12">
+                                <div class="mb-2 alert alert-info" id="warning-text-changing-password">
+                                    <i class="icon fa-solid fa-info mr-2"></i>
+                                    <?php echo $lang->get('objects_encryption_explanation'); ?>
+                                </div>
+                                <div class="input-group mb-3">
+                                    <div class="input-group-prepend">
+                                        <span class="input-group-text"><?php echo $lang->get('personal_salt_key'); ?></span>
+                                    </div>
+                                    <input type="password" class="form-control" id="user-current-defuse-psk">
+                                </div>
+                                <div class="form-control mt-3 font-weight-light grey" id="user-current-defuse-psk-progress">
+                                    <?php echo $lang->get('provide_current_psk_and_click_launch'); ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-primary" id="button_do_personal_items_reencryption"><?php echo $lang->get('launch'); ?></button>
+                        <button class="btn btn-default float-right" id="button_close_personal_items_reencryption"><?php echo $lang->get('close'); ?></button>
+                    </div>
+                </div>
+                <!-- /.ENCRYPTION PERSONAL ITEMS GENERATION -->
+                
+
+                <?php
+                    // Case where user is allowed to see the page
+                    if ($get['page'] === 'items') {
+                        // SHow page with Items
+                        if ((int) $session_user_admin !== 1) {
+                            include $SETTINGS['cpassman_dir'] . '/pages/items.php';
+                        } elseif ((int) $session_user_admin === 1) {
+                            include $SETTINGS['cpassman_dir'] . '/pages/admin.php';
+                        } else {
+                            $session->set('system-error_code', ERR_NOT_ALLOWED);
+                            //not allowed page
+                            include $SETTINGS['cpassman_dir'] . '/error.php';
+                        }
+                    } elseif (in_array($get['page'], array_keys($mngPages)) === true) {
+                        // Define if user is allowed to see management pages
+                        if ($session_user_admin === 1) {
+                            // deepcode ignore FileInclusion: $get['page'] is secured through usage of array_keys test bellow
+                            include $SETTINGS['cpassman_dir'] . '/pages/' . basename($mngPages[$get['page']]);
+                        } elseif ($session_user_manager === 1 || $session_user_human_resources === 1) {
+                            if ($get['page'] === 'manage_main' || $get['page'] === 'manage_settings'
+                            ) {
+                                $session->set('system-error_code', ERR_NOT_ALLOWED);
+                                //not allowed page
+                                include $SETTINGS['cpassman_dir'] . '/error.php';
+                            }
+                        } else {
+                            $session->set('system-error_code', ERR_NOT_ALLOWED);
+                            //not allowed page
+                            include $SETTINGS['cpassman_dir'] . '/error.php';
+                        }
+                    } elseif (empty($get['page']) === false && file_exists($SETTINGS['cpassman_dir'] . '/pages/' . $get['page'] . '.php') === true) {
+                        // deepcode ignore FileInclusion: $get['page'] is tested against file_exists just below
+                        include $SETTINGS['cpassman_dir'] . '/pages/' . basename($get['page'] . '.php');
+                    } else {
+                        $session->set('system-array_roles', ERR_NOT_EXIST);
+                        //page doesn't exist
+                        include $SETTINGS['cpassman_dir'].'/error.php';
+                    }
+
+?>
+
+            </div>
+            <!-- /.content-wrapper -->
+
+            <!-- Control Sidebar -->
+            <aside class="control-sidebar control-sidebar-dark">
+                <!-- Control sidebar content goes here -->
+                <div class="p-3">
+                    <h5><?php echo $lang->get('last_items_title'); ?></h5>
+                    <div>
+                        <ul class="list-unstyled" id="index-last-pwds">
+                        </ul>
+                    </div>
+                </div>
+            </aside>
+            <!-- /.control-sidebar -->
+
+            <!-- Main Footer -->
+            <footer class="main-footer">
+                <!-- To the right -->
+                <div class="float-right d-none d-sm-inline">
+                    <?php echo $lang->get('version_alone'); ?>&nbsp;<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>
+                </div>
+                <!-- Default to the left -->
+                <strong>Copyright &copy; <?php echo TP_COPYRIGHT; ?> <a href="<?php echo TEAMPASS_URL; ?>"><?php echo TP_TOOL_NAME; ?></a>.</strong> All rights reserved.
+            </footer>
+        </div>
+        <!-- ./wrapper -->
+
+    <?php
+        /* MAIN PAGE */
+
         echo '
-                    &nbsp;
-                    <a class="btn btn-default" href="#" onclick="MenuAction(\'manage_main\')">
-                        <i class="fa fa-info fa-2x tip" title="' . $LANG['admin_main'].'"></i>
-                    </a>
-                    <a class="btn btn-default" href="#" onclick="MenuAction(\'manage_settings\')">
-                        <i class="fa fa-wrench fa-2x tip" title="' . $LANG['admin_settings'].'"></i>
-                    </a>';
-    }
-
-    if ($session_user_admin === '1' || $session_user_manager === '1' || $session_user_human_resources === '1') {
-        echo '
-                &nbsp;
-                <a class="btn btn-default" href="#" onclick="MenuAction(\'manage_folders\')">
-                    <i class="fa fa-folder-open fa-2x tip" title="' . $LANG['admin_groups'].'"></i>
-                </a>
-                <a class="btn btn-default" href="#" onclick="MenuAction(\'manage_roles\')">
-                    <i class="fa fa-graduation-cap fa-2x tip" title="' . $LANG['admin_functions'].'"></i>
-                </a>
-                <a class="btn btn-default" href="#" onclick="MenuAction(\'manage_users\')">
-                    <i class="fa fa-users fa-2x tip" title="' . $LANG['admin_users'].'"></i>
-                </a>
-                <a class="btn btn-default" href="#" onclick="MenuAction(\'manage_views\')">
-                    <i class="fa fa-cubes fa-2x tip" title="' . $LANG['admin_views'].'"></i>
-                </a>';
-    }
-
-    echo '
-                <div style="float:right;">
-                    <ul class="menu" style="">
-                        <li class="" style="padding:4px;width:40px; text-align:center;"><i class="fa fa-dashboard fa-fw"></i>&nbsp;
-                            <ul class="menu_200" style="text-align:left;">',
-    ($session_user_admin === '1' && $SETTINGS_EXT['admin_full_right'] === true) ? '' : isset($SETTINGS['enable_pf_feature']) === true && $SETTINGS['enable_pf_feature'] == 1 ? '
-                                <li onclick="$(\'#div_set_personal_saltkey\').dialog(\'open\')">
-                                    <i class="fa fa-key fa-fw"></i> &nbsp;' . $LANG['home_personal_saltkey_button'].'
-                                </li>' : '', '
-                                <li onclick="$(\'#div_increase_session_time\').dialog(\'open\')">
-                                    <i class="fa fa-clock-o fa-fw"></i> &nbsp;' . $LANG['index_add_one_hour'].'
-                                </li>
-                                <li onclick="loadProfileDialog()">
-                                    <i class="fa fa-user fa-fw"></i> &nbsp;' . $LANG['my_profile'].'
-                                </li>
-                                <li onclick="MenuAction(\'deconnexion\', \'' . $session_user_id.'\')">
-                                    <i class="fa fa-sign-out fa-fw"></i> &nbsp;' . $LANG['disconnect'].'
-                                </li>
-                            </ul>
-                        </li>
-                    </ul>
-                </div>';
-
-    if ($session_user_admin !== '1' || ($session_user_admin === '1' && $SETTINGS_EXT['admin_full_right'] === false)) {
-        echo '
-                <div style="float:right; margin-right:10px;">
-                    <ul class="menu" id="menu_last_seen_items">
-                        <li class="" style="padding:4px;width:40px; text-align:center;"><i class="fa fa-map fa-fw"></i>&nbsp;&nbsp;
-                            <ul class="menu_200" id="last_seen_items_list" style="text-align:left;">
-                                <li>' . $LANG['please_wait'].'</li>
-                            </ul>
-                        </li>
-                    </ul>
-                </div>';
-    }
-
-    // show avatar
-    if ($session_user_avatar_thumb !== null && empty($session_user_avatar_thumb) === false) {
-        if (file_exists('includes/avatars/'.$session_user_avatar_thumb)) {
-            $avatar = $SETTINGS['cpassman_url'].'/includes/avatars/'.$session_user_avatar_thumb;
-        } else {
-            $avatar = $SETTINGS['cpassman_url'].'/includes/images/photo.jpg';
-        }
-    } else {
-        $avatar = $SETTINGS['cpassman_url'].'/includes/images/photo.jpg';
-    }
-    echo '
-                <div style="float:right; margin-right:10px;">
-                    <img src="' . $avatar.'" style="border-radius:10px; height:28px; cursor:pointer;" onclick="loadProfileDialog()" alt="photo" id="user_avatar_thumb" />
-                </div>';
-
-    echo '
-            </div>';
-
-    echo '
-        </div>';
-}
-
-echo '
-    </div>';
-
-echo '
-<div id="main_info_box" style="display:none; z-index:99999; position:absolute; width:400px; height:40px;" class="ui-widget ui-state-active ui-color">
-    <span class="closeButton" onclick="$(\'#main_info_box\').hide()">&#10006</span>
-    <div id="main_info_box_text" style="text-align:center;margin-top:10px;"></div>
-</div>';
-
-/* MAIN PAGE */
-echo '
-        <input type="hidden" id="temps_restant" value="', isset($_SESSION['fin_session']) ? $_SESSION['fin_session'] : '', '" />
-        <input type="hidden" name="language" id="language" value="" />
-        <input type="hidden" name="user_pw_complexity" id="user_pw_complexity" value="', isset($_SESSION['user_pw_complexity']) ? $_SESSION['user_pw_complexity'] : '', '" />
-        <input type="hidden" name="user_session" id="user_session" value=""/>
-        <input type="hidden" name="encryptClientServer" id="encryptClientServer" value="', isset($SETTINGS['encryptClientServer']) ? $SETTINGS['encryptClientServer'] : '1', '" />
-        <input type="hidden" name="please_login" id="please_login" value="" />
-        <input type="hidden" name="disabled_action_on_going" id="disabled_action_on_going" value="" />
-        <input type="hidden" id="duo_sig_response" value="', null !== $post_sig_response ? $post_sig_response : '', '" />';
-
-// SENDING STATISTICS?
-if (isset($SETTINGS['send_stats']) && $SETTINGS['send_stats'] === "1"
-    && (!isset($_SESSION['temporary']['send_stats_done']) || $_SESSION['temporary']['send_stats_done'] !== "1")
-) {
-    echo '
-            <input type="hidden" name="send_statistics" id="send_statistics" value="1" />';
-} else {
-    echo '
-        <input type="hidden" name="send_statistics" id="send_statistics" value="0" />';
-}
-
-echo '
-    <div id="', (isset($_GET['page']) && filter_var($_GET['page'], FILTER_SANITIZE_STRING) === "items" && $session_user_id !== null) ? "main_simple" : "main", '">';
-// MESSAGE BOX
-echo '
-            <div style="" class="div_center">
-                <div id="message_box" style="display:none;width:200px;padding:5px;text-align:center; z-index:999999;" class="ui-widget-content ui-state-error ui-corner-all"></div>
-            </div>';
-// Main page
-if ($session_autoriser !== null && $session_autoriser === true) {
-    // Show menu
-    echo '
-            <form method="post" name="main_form" action="">
-                <input type="hidden" name="menu_action" id="menu_action" value="" />
-                <input type="hidden" name="changer_pw" id="changer_pw" value="" />
-                <input type="hidden" name="form_user_id" id="form_user_id" value="', $session_user_id !== null ? $session_user_id : '', '" />
-                <input type="hidden" name="is_admin" id="is_admin" value="', $session_is_admin !== null ? $session_is_admin : '', '" />
-                <input type="hidden" name="personal_saltkey_set" id="personal_saltkey_set" value="', isset($_SESSION['user_settings']['clear_psk']) ? true : false, '" />
-            </form>';
-}
-// ---------
-// Display a help to admin
-$errorAdmin = $nextUrl = "";
-
-// error nb folders
-if ($session_nb_folders !== null && intval($session_nb_folders) === 0) {
-    $errorAdmin = '<span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_no_folders'].'<br />';
-}
-// error nb roles
-if ($session_nb_roles !== null && intval($session_nb_roles) === 0) {
-    if (empty($errorAdmin)) {
-        $errorAdmin = '<span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_no_roles'];
-    } else {
-        $errorAdmin .= '<br /><span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_no_roles'];
-    }
-}
-
-if ($session_validite_pw !== null && empty($session_validite_pw) === false) {
-    // error cpassman dir
-    if (isset($SETTINGS['cpassman_dir']) && empty($SETTINGS['cpassman_dir']) || !isset($SETTINGS['cpassman_dir'])) {
-        if (empty($errorAdmin)) {
-            $errorAdmin = '<span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_cpassman_dir'];
-        } else {
-            $errorAdmin .= '<br /><span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_cpassman_dir'];
-        }
-    }
-    // error cpassman url
-    if ($session_validite_pw !== null && (isset($SETTINGS['cpassman_url']) && empty($SETTINGS['cpassman_url']) || !isset($SETTINGS['cpassman_url']))) {
-        if (empty($errorAdmin)) {
-            $errorAdmin = '<span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_cpassman_url'];
-        } else {
-            $errorAdmin .= '<br /><span class="ui-icon ui-icon-lightbulb" style="float: left; margin-right: .3em;">&nbsp;</span>'.$LANG['error_cpassman_url'];
-        }
-    }
-}
-// Display help
-if (!empty($errorAdmin)) {
-    echo '
-                <div style="margin:10px;padding:10px;" class="ui-state-error ui-corner-all">
-                ' . $errorAdmin.'
-                </div>';
-}
-// -----------
-// Display Maintenance mode information
-if (isset($SETTINGS['maintenance_mode']) === true && $SETTINGS['maintenance_mode'] === '1'
-    && $session_user_admin !== null && $session_user_admin === '1'
-) {
-    echo '
-            <div style="text-align:center;margin-bottom:5px;padding:10px;" class="ui-state-highlight ui-corner-all">
-                <b>' . $LANG['index_maintenance_mode_admin'].'</b>
-            </div>';
-}
-// Display UPDATE NEEDED information
-if (isset($SETTINGS['update_needed']) && $SETTINGS['update_needed'] === true
-    && $session_user_admin !== null && $session_user_admin === '1'
-    && (($session_hide_maintenance !== null && $session_hide_maintenance === '0')
-    || $session_hide_maintenance === null)
-) {
-    echo '
-            <div style="text-align:center;margin-bottom:5px;padding:10px;"
-                class="ui-state-highlight ui-corner-all" id="div_maintenance">
-                <b>' . $LANG['update_needed_mode_admin'].'</b>
-                <span style="float:right;cursor:pointer;">
-                    <span class="fa fa-close mi-red" onclick="toggleDiv(\'div_maintenance\')"></span>
-                </span>
-            </div>';
-}
-
+<input type="hidden" id="temps_restant" value="', $session->get('user-session_duration') ?? '', '" />';
 // display an item in the context of OTV link
-if (($session_validite_pw === null || empty($session_validite_pw) === true || empty($session_user_id) === true) &&
-    isset($_GET['otv']) && filter_var($_GET['otv'], FILTER_SANITIZE_STRING) === 'true'
+} elseif ((null === $session->get('user-validite_pw')|| empty($session->get('user-validite_pw')) === true || empty($session->get('user-id')) === true)
+    && empty($get['otv']) === false
 ) {
     // case where one-shot viewer
-    if (isset($_GET['code']) && !empty($_GET['code'])
-        && isset($_GET['stamp']) && !empty($_GET['stamp'])
+    if (empty($request->query->get('code')) === false && empty($request->query->get('stamp')) === false
     ) {
-        include 'otv.php';
+        include './includes/core/otv.php';
     } else {
-        $_SESSION['error']['code'] = ERR_VALID_SESSION;
-        $superGlobal->put(
-            "initial_url",
+        $session->set('system-error_code', ERR_VALID_SESSION);
+        $session->set(
+            'user-initial_url',
             filter_var(
-                substr($server_request_uri, strpos($server_request_uri, "index.php?")),
+                substr(
+                    $server['request_uri'],
+                    strpos($server['request_uri'], 'index.php?')
+                ),
                 FILTER_SANITIZE_URL
-            ),
-            "SESSION"
+            )
         );
-        include $SETTINGS['cpassman_dir'].'/error.php';
+        include $SETTINGS['cpassman_dir'] . '/error.php';
     }
-    // Ask the user to change his password
-} elseif (($session_validite_pw === null || $session_validite_pw === false)
-    && empty($session_user_id) === false
-) {
-    //Check if password is valid
-    echo '
-        <div style="margin:auto; padding:20px; width:500px;" class="ui-state-focus ui-corner-all">
-            <h3>' . $LANG['index_change_pw'].'</h3>
-            <div style="height:20px;text-align:center;margin:2px;display:none;" id="change_pwd_error" class=""></div>
-            <div style="text-align:center;margin:5px;padding:3px;" id="change_pwd_complexPw" class="ui-widget ui-state-active ui-corner-all">' .
-        $LANG['complex_asked'].' : '.$SETTINGS_EXT['pwComplexity'][$_SESSION['user_pw_complexity']][1].
-        '</div>
-            <div id="pw_strength" style="margin:0 0 10px 140px;"></div>
-            <table>
-                <tr>
-                    <td>' . $LANG['index_new_pw'].' :</td><td><input type="password" size="15" name="new_pw" id="new_pw"/></td>
-                </tr>
-                <tr><td>' . $LANG['index_change_pw_confirmation'].' :</td><td><input type="password" size="15" name="new_pw2" id="new_pw2" onkeypress="if (event.keyCode == 13) ChangeMyPass();" /></td></tr>
-            </table>
-            <input type="hidden" id="pw_strength_value" />
-            <div style="width:420px; text-align:center; margin:15px 0 10px 0;">
-                <input type="button" onClick="ChangeMyPass()" onkeypress="if (event.keyCode == 13) ChangeMyPass();" class="ui-state-default ui-corner-all" style="padding:4px;width:150px;margin:10px 0 0 80px;" value="' . $LANG['index_change_pw_button'].'" />
-            </div>
-        </div>
-        <script type="text/javascript">
-            $("#new_pw").focus();
-        </script>';
-// Display pages
-} elseif ($session_validite_pw !== null
-    && $session_validite_pw === true
-    && empty($_GET['page']) === false
-    && empty($session_user_id) === false
-) {
-    if ($session_initial_url !== null && empty($session_initial_url) === false) {
-        include $session_initial_url;
-    } elseif ($_GET['page'] == "items") {
-        // SHow page with Items
-        if (($session_user_admin !== '1')
-            ||
-            ($session_user_admin === '1' && $SETTINGS_EXT['admin_full_right'] === false)
-        ) {
-            include 'items.php';
-        } else {
-            $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-            include $SETTINGS['cpassman_dir'].'/error.php';
-        }
-    } elseif ($_GET['page'] == "find") {
-        // Show page for items findind
-        include 'find.php';
-    } elseif ($_GET['page'] == "favourites") {
-        // Show page for user favourites
-        include 'favorites.php';
-    } elseif ($_GET['page'] == "kb") {
-        // Show page KB
-        if (isset($SETTINGS['enable_kb']) && $SETTINGS['enable_kb'] == 1) {
-            include 'kb.php';
-        } else {
-            $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-            include $SETTINGS['cpassman_dir'].'/error.php';
-        }
-    } elseif ($_GET['page'] == "suggestion") {
-        // Show page KB
-        if (isset($SETTINGS['enable_suggestion']) && $SETTINGS['enable_suggestion'] == 1) {
-            include 'suggestion.php';
-        } else {
-            $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-            include $SETTINGS['cpassman_dir'].'/error.php';
-        }
-    } elseif (in_array($_GET['page'], array_keys($mngPages))) {
-        // Define if user is allowed to see management pages
-        if ($session_user_admin === '1') {
-            include $mngPages[$_GET['page']];
-        } elseif ($session_user_manager === '1' || $session_user_human_resources == '1') {
-            if (($_GET['page'] != "manage_main" && $_GET['page'] != "manage_settings")) {
-                include $mngPages[$_GET['page']];
-            } else {
-                $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-                include $SETTINGS['cpassman_dir'].'/error.php';
-            }
-        } else {
-            $_SESSION['error']['code'] = ERR_NOT_ALLOWED; //not allowed page
-            include $SETTINGS['cpassman_dir'].'/error.php';
-        }
-    } else {
-        $_SESSION['error']['code'] = ERR_NOT_EXIST; //page doesn't exist
-        include $SETTINGS['cpassman_dir'].'/error.php';
-    }
-    // Case of password recovery
-} elseif (isset($_GET['action']) === true && $_GET['action'] === "password_recovery"
-    && isset($_GET['key']) === true
-    && isset($_GET['login']) === true
-) {
-    // Case where user has asked new PW
-    echo '
-            <div style="width:400px;margin:50px auto 50px auto;padding:25px;" class="ui-state-highlight ui-corner-all">
-                <div style="text-align:center;font-weight:bold;margin-bottom:20px;">
-                    ' . $LANG['pw_recovery_asked'].'
-                </div>
-                <div id="generate_new_pw_error" style="color:red;display:none;text-align:center;margin:5px;"></div>
-                <div style="margin-bottom:3px;">
-                    ' . $LANG['pw_recovery_info'].'
-                </div>
-                <div style="margin:15px; text-align:center;">
-                    <input type="button" id="but_generate_new_password" style="padding:3px;cursor:pointer;" class="ui-state-default ui-corner-all" value="'.$LANG['pw_recovery_button'].'" />
-                    <br /><br />
-                    <div id="ajax_loader_send_mail" style="display:none; margin: 20px;"><span class="fa fa-cog fa-spin fa-2x"></span></div>
-                </div>
-                <div style="margin-top:30px; text-align:center;">
-                    <a href="index.php" class="tip" title="' . $LANG['home'].'"><span class="fa fa-home fa-lg"></span></a>
-                </div>
-            </div>';
-} elseif (empty($session_user_id) === false && $session_user_id !== null) {
-    // Page doesn't exist
-    $_SESSION['error']['code'] = ERR_NOT_EXIST;
-    include $SETTINGS['cpassman_dir'].'/error.php';
-// When user is not identified
-} else {
-    // Automatic redirection
-    if (strpos($server_request_uri, "?") > 0) {
-        $nextUrl = filter_var(substr($server_request_uri, strpos($server_request_uri, "?")), FILTER_SANITIZE_URL);
-    }
-    // MAINTENANCE MODE
-    if (isset($SETTINGS['maintenance_mode']) === true && $SETTINGS['maintenance_mode'] === '1') {
-        echo '
-                <div style="text-align:center;margin-top:30px;margin-bottom:20px;padding:10px;"
-                    class="ui-state-error ui-corner-all">
-                    <b>' . addslashes($LANG['index_maintenance_mode']).'</b>
-                </div>';
-    } elseif (isset($_GET['session_over']) && $_GET['session_over'] === 'true') {
-        // SESSION FINISHED => RECONNECTION ASKED
-        echo '
-                    <div style="text-align:center;margin-top:30px;margin-bottom:20px;padding:10px;"
-                        class="ui-state-error ui-corner-all">
-                        <b>' . addslashes($LANG['index_session_expired']).'</b>
-                    </div>';
-    }
-
+} elseif (//(empty($session->get('user-id')) === false && $session->get('user-id') !== null) ||
+        empty($session->get('user-id')) === true
+        || null === $session->get('user-validite_pw')
+        || $session->get('user-validite_pw') === 0
+    ) {
     // case where user not logged and can't access a direct link
-    if (empty($_GET['page']) === false) {
-        $superGlobal->put(
-            "initial_url",
+    if (empty($get['page']) === false) {
+        $session->set(
+            'user-initial_url',
             filter_var(
-                substr($server_request_uri, strpos($server_request_uri, "index.php?")),
+                substr($server['request_uri'], strpos($server['request_uri'], 'index.php?')),
                 FILTER_SANITIZE_URL
-            ),
-            "SESSION"
+            )
         );
         // REDIRECTION PAGE ERREUR
         echo '
             <script language="javascript" type="text/javascript">
-            <!--
-                sessionStorage.clear();
-                window.location.href = "index.php";
-            -->
+                window.location.href = "./index.php";
             </script>';
         exit;
-    } else {
-        $superGlobal->put("initial_url", '', "SESSION");
-    }
-
-    // CONNECTION FORM
-    echo '
-                <form method="post" name="form_identify" id="form_identify" action="">
-                    <div style="width:480px;margin:10px auto 10px auto;padding:25px;" class="ui-state-highlight ui-corner-all">
-                        <div style="text-align:center;font-weight:bold;margin-bottom:20px;">',
-    isset($SETTINGS['custom_logo']) && !empty($SETTINGS['custom_logo']) ? '<img src="'.(string) $SETTINGS['custom_logo'].'" alt="" style="margin-bottom:40px;" />' : '', '<br />
-                            ' . $LANG['index_get_identified'].'
-                            <span id="ajax_loader_connexion" style="display:none;margin-left:10px;"><span class="fa fa-cog fa-spin fa-1x"></span></span>
-                        </div>
-                        <div id="connection_error" style="display:none;text-align:center;margin:5px; padding:3px;" class="ui-state-error ui-corner-all">&nbsp;<i class="fa fa-warning"></i>&nbsp;' . $LANG['index_bas_pw'].'</div>';
-
-    if (isset($SETTINGS['enable_http_request_login']) === true
-        && $SETTINGS['enable_http_request_login'] === '1'
-        && isset($_SERVER['PHP_AUTH_USER']) === true
-        && !(isset($SETTINGS['maintenance_mode']) === true
-            && $SETTINGS['maintenance_mode'] === '1')
-    ) {
-        if (strpos($_SERVER['PHP_AUTH_USER'], '@') !== false) {
-            $username = explode("@", $_SERVER['PHP_AUTH_USER'])[0];
-        } elseif (strpos($_SERVER['PHP_AUTH_USER'], '\\') !== false) {
-            $username = explode("\\", $_SERVER['PHP_AUTH_USER'])[1];
-        } else {
-            $username = $_SERVER['PHP_AUTH_USER'];
-        }
-        echo '
-        				<div style="margin-bottom:3px;">
-        			        <label for="login" class="form_label">', isset($SETTINGS['custom_login_text']) && !empty($SETTINGS['custom_login_text']) ? (string) $SETTINGS['custom_login_text'] : $LANG['index_login'], '</label>
-        		            <input type="text" size="10" id="login" name="login" class="input_text text ui-widget-content ui-corner-all" value="', filter_var($username, FILTER_SANITIZE_STRING), '" readonly />
-        		            <span id="login_check_wait" style="display:none; float:right;"><i class="fa fa-cog fa-spin fa-1x"></i></span>
-                        </div>';
-    } else {
-        echo '
-                    	    <div style="margin-bottom:3px;">
-                    	        <label for="login" class="form_label">', isset($SETTINGS['custom_login_text']) && !empty($SETTINGS['custom_login_text']) ? (string) $SETTINGS['custom_login_text'] : $LANG['index_login'], '</label>
-                                <input type="text" size="10" id="login" name="login" class="input_text text ui-widget-content ui-corner-all" value="', empty($post_login) === false ? $post_login : '', '" />
-                                <span id="login_check_wait" style="display:none; float:right;"><i class="fa fa-cog fa-spin fa-1x"></i></span>
-                           </div>';
-    }
-
-    if (!(isset($SETTINGS['enable_http_request_login']) === true
-        && $SETTINGS['enable_http_request_login'] === '1'
-        && isset($_SERVER['PHP_AUTH_USER']) === true
-        && !(isset($SETTINGS['maintenance_mode']) === true && $SETTINGS['maintenance_mode'] === '1'))
-    ) {
-        echo '
-                        <div id="connect_pw" style="margin-bottom:3px;">
-                            <label for="pw" class="form_label" id="user_pwd">' . $LANG['index_password'].'</label>
-                            <input type="password" size="10" id="pw" name="pw" class="input_text text ui-widget-content ui-corner-all submit-button" value="', empty($post_pw) === false ? $post_pw : '', '" />
-                        </div>';
-    }
-
-    echo '
-                        <div style="margin-bottom:3px;">
-                            <label for="duree_session" class="">' . $LANG['index_session_duration'].'&nbsp;('.$LANG['minutes'].') </label>
-                            <input type="text" size="4" id="duree_session" name="duree_session" value="', isset($SETTINGS['default_session_expiration_time']) ? $SETTINGS['default_session_expiration_time'] : "60", '" class="input_text text ui-widget-content ui-corner-all numeric_only submit-button" />
-                        </div>';
-
-    // 2FA auth selector
-    echo '
-                        <input type="hidden" id="2fa_agses" value="', isset($SETTINGS['agses_authentication_enabled']) === true && $SETTINGS['agses_authentication_enabled'] === '1' ? '1' : '0', '" />
-                        <input type="hidden" id="2fa_duo" value="', isset($SETTINGS['duo']) === true && $SETTINGS['duo'] === '1' ? '1' : '0', '" />
-                        <input type="hidden" id="2fa_google" value="', isset($SETTINGS['google_authentication']) === true && $SETTINGS['google_authentication'] === '1' ? '1' : '0', '" />
-                        <input type="hidden" id="2fa_yubico" value="', isset($SETTINGS['yubico_authentication']) === true && $SETTINGS['yubico_authentication'] === '1' ? '1' : '0', '" />
-                        <input type="hidden" id="2fa_user_selection" value="', 
-                            (isset($_GET['post_type']) === true && $_GET['post_type'] === 'duo' ? 'duo' : '')
-                        , '" />
-                        <div id="2fa_selector" class="hidden">
-                            <div>
-                                <legend>'.addslashes($LANG['2fa_authentication_selector']).'</legend>
-                                <div id="2fa_methods_selector" class="2fa-methods" style="padding:3px; text-align:center;">
-                                ', isset($SETTINGS['google_authentication']) === true && $SETTINGS['google_authentication'] === '1' ?
-                                    '<label for="select2fa-google">Google</label>
-                                    <input type="radio" class="2fa_selector_select" name="2fa_selector_select" id="select2fa-google">' : '', '
-                                    ', isset($SETTINGS['agses_authentication_enabled']) === true && $SETTINGS['agses_authentication_enabled'] === '1' ?
-                                    '<label for="select2fa-agses">Agses</label>
-                                    <input type="radio" class="2fa_selector_select" name="2fa_selector_select" id="select2fa-agses">' : '', '
-                                    ', isset($SETTINGS['duo']) === true && $SETTINGS['duo'] === '1' ?
-                                    '<label for="select2fa-duo">Duo Security</label>
-                                    <input type="radio" class="2fa_selector_select" name="2fa_selector_select" id="select2fa-duo">' : '', '
-                                    ', isset($SETTINGS['yubico_authentication']) === true && $SETTINGS['yubico_authentication'] === '1' ?
-                                    '<label for="select2fa-yubico">Yubico</label>
-                                    <input type="radio" class="2fa_selector_select" name="2fa_selector_select" id="select2fa-yubico">' : '', '
-                                </div>
-                            </div>
-                            <div>
-
-                            </div>
-                        </div>';
-
-    // AGSES
-    if (isset($SETTINGS['agses_authentication_enabled']) === true && $SETTINGS['agses_authentication_enabled'] === '1') {
-        echo '
-                        <div id="div-2fa-agses" class="div-2fa-method ', isset($_SESSION['2famethod-agses']) === true && $_SESSION['2famethod-agses'] === '1' ? '' : 'hidden', '">
-                        <div id="agses_cardid_div" style="text-align:center; padding:5px; width:454px; margin:5px 0 5px;" class="ui-state-active ui-corner-all">
-                            ' . $LANG['user_profile_agses_card_id'].': &nbsp;
-                            <input type="text" size="12" id="agses_cardid">
-                        </div>
-                        <div id="agses_flickercode_div" style="text-align:center; display:none;">
-                            <canvas id="axs_canvas"></canvas>
-                        </div>
-                        <input type="text" id="agses_code" name="agses_code" style="margin-top:15px;" class="input_text text ui-widget-content ui-corner-all hidden submit-button" placeholder="' . addslashes($LANG['index_agses_key']).'" />
-                        </div>';
-    }
-
-    // Google Authenticator code
-    if (isset($SETTINGS['google_authentication']) === true && $SETTINGS['google_authentication'] === "1") {
-        echo '
-                        <div id="div-2fa-google" class="div-2fa-method ', isset($_SESSION['2famethod-google']) === true && $_SESSION['2famethod-google'] === '1' ? '' : 'hidden', '">
-                        <div id="ga_code_div" style="margin-top:5px; padding:5px; overflow: auto; width:95%;" class="ui-state-default ui-corner-all">
-                            <div style="width: 18%; float:left; display:block;">
-                                <img src="includes/images/2fa_google_auth.png">
-                            </div>
-
-                            <div style="width: 82%; float:right; display:block;">
-                                <input type="text" size="4" id="ga_code" name="ga_code" style="margin-top:15px;" class="input_text text ui-widget-content ui-corner-all numeric_only submit-button" placeholder="' . addslashes($LANG['ga_identification_code']).'" />
-                                <div id="2fa_new_code_div" style="text-align:center; display:none; margin-top:5px; padding:5px;" class="ui-state-default ui-corner-all"></div>
-                                <div style="margin-top:2px; font-size:10px; text-align:center; cursor:pointer;" onclick="send_user_new_temporary_ga_code()">' . $LANG['i_need_to_generate_new_ga_code'].'</div>
-                            </div>
-                        </div>
-                        </div>';
-    }
-
-    // Google Authenticator code
-    if (isset($SETTINGS['disable_show_forgot_pwd_link']) === true && $SETTINGS['disable_show_forgot_pwd_link'] !== "1") {
-        echo '
-                        <div style="text-align:center;margin-top:10px;font-size:10pt;">
-                            <span onclick="OpenDialog(\'div_forgot_pw\')" style="padding:3px;cursor:pointer;">' . $LANG['forgot_my_pw'].'</span>
-                        </div>';
-    }
-
-    if (isset($SETTINGS['enable_http_request_login']) === true
-        && $SETTINGS['enable_http_request_login'] === '1'
-        && isset($_SERVER['PHP_AUTH_USER']) === true
-        && !(isset($SETTINGS['maintenance_mode']) === true
-            && $SETTINGS['maintenance_mode'] === '1')
-    ) {
-        echo '
-<script>
-var seconds = 1;
-function updateLogonButton(timeToGo){
-    document.getElementById("but_identify_user").value = "' . $LANG['duration_login_attempt'].' " + timeToGo;
-}
-$( window ).on( "load", function() {
-    updateLogonButton(seconds);
-    setInterval(function() {
-        seconds--;
-        if (seconds >= 0) {
-            updateLogonButton(seconds);
-        } else if(seconds === 0) {
-            launchIdentify(\'\', \''.$nextUrl.'\');
-        }
-        updateLogonButton(seconds);
-    },
-    1000
-  );
-});
-</script>';
-    }
-
-    // Yubico authentication
-    if (isset($SETTINGS['yubico_authentication']) === true && $SETTINGS['yubico_authentication'] === "1") {
-        echo '
-                        <div id="div-2fa-yubico" class="div-2fa-method ', isset($_SESSION['2famethod-yubico']) === true && $_SESSION['2famethod-yubico'] === '1' ? '' : 'hidden', '">
-                        <div id="yubico_div" style="margin-top:5px; padding:5px; overflow: auto; width:95%;" class="ui-state-default ui-corner-all">
-                            <div style="width: 18%; float:left; display:block;">
-                                <img src="includes/images/yubico.png">
-                            </div>
-
-                            <div style="width: 82%; float:right; display:block;">
-                                <div id="yubico_credentials_div" class="hidden">
-                                    <h4>' . addslashes($LANG['provide_yubico_identifiers']).'</h4>
-                                    <label for="yubico_user_id">' . $LANG['yubico_user_id'].'</label>
-                                    <input type="text" size="10" id="yubico_user_id" class="input_text text ui-widget-content ui-corner-all" />
-
-                                    <label for="yubico_user_key">' . $LANG['yubico_user_key'].'</label>
-                                    <input type="text" size="10" id="yubico_user_key" class="input_text text ui-widget-content ui-corner-all" />
-                                </div>
-                                <input autocomplete="off" type="text" id="yubiko_key" class="input_text text ui-widget-content ui-corner-all" placeholder="'.addslashes($LANG['press_your_yubico_key']).'" style="margin-top:20px;">
-                                <div id="show_yubico_credentials" class="hidden"><a href="#" id="yubico_link">'.addslashes($LANG['show_yubico_info_form']).'</a></div>
-                            </div>
-                        </div>
-                        </div>';
     }
     
-    // LOgin button
-    echo '
-                        <div id="div-login-button" class="" style="text-align:center;margin-top:15px;">
-                            <a href="#" id="but_identify_user" onclick="launchIdentify(\'\', \''.$nextUrl.'\')" style="padding:3px;cursor:pointer;">'.$LANG['log_in'].'</a>
-                        </div>';
-
-    echo '
-                    </div>
-                </form>
-                <script type="text/javascript">
-                    $("#login").focus();
-                </script>';
-    // DIV for forgotten password
-    echo '
-                <div id="div_forgot_pw" style="display:none;">
-                    <div style="margin:5px auto 5px auto;" id="div_forgot_pw_alert"></div>
-                    <div style="margin:5px auto 5px auto;">' . $LANG['forgot_my_pw_text'].'</div>
-                    <label for="forgot_pw_email">' . $LANG['email'].'</label>
-                    <input type="text" size="40" name="forgot_pw_email" id="forgot_pw_email" />
-                    <br />
-                    <label for="forgot_pw_login">' . $LANG['login'].'</label>
-                    <input type="text" size="20" name="forgot_pw_login" id="forgot_pw_login" />
-                    <div id="div_forgot_pw_status" style="text-align:center;margin-top:15px;display:none; padding:5px;" class="ui-corner-all">
-                        <i class="fa fa-cog fa-spin fa-2x"></i>&nbsp;<b>' . $LANG['please_wait'].'</b>
-                    </div>
-                </div>';
+    // LOGIN form  
+    include $SETTINGS['cpassman_dir'] . '/includes/core/login.php';
+    
+} else {
+    // Clear session
+    $session->invalidate();
 }
-echo '
-    </div>';
-// FOOTER
-/* DON'T MODIFY THE FOOTER ... MANY THANKS TO YOU */
-echo '
-    <div id="footer">
-        <div style="float:left;width:32%;">
-            <a href="https://teampass.net" target="_blank" style="color:#F0F0F0;">' . $SETTINGS_EXT['tool_name'].'&nbsp;'.$SETTINGS_EXT['version_full'].'&nbsp;<i class="fa fa-copyright"></i>&nbsp;'.$SETTINGS_EXT['copyright'].'</a>
-            &nbsp;|&nbsp;
-            <a href="https://teampass.readthedocs.io/en/latest/" target="_blank" style="color:#F0F0F0;" class="tip" title="' . addslashes($LANG['documentation_canal']).' ReadTheDocs"><i class="fa fa-book"></i></a>
-            &nbsp;
-            <a href="https://www.reddit.com/r/TeamPass/" target="_blank" style="color:#F0F0F0;" class="tip" title="' . addslashes($LANG['admin_help']).'"><i class="fa fa-reddit-alien"></i></a>
-            &nbsp;
-            ', ($session_user_id !== null && empty($session_user_id) === false) ? '
-            <a href="#" style="color:#F0F0F0;" class="tip" title="' . addslashes($LANG['bugs_page']).'" onclick="generateBugReport()"><i class="fa fa-bug"></i></a>' : '', '
-        </div>
-        <div style="float:left;width:32%;text-align:center;">
-            ', ($session_user_id !== null && empty($session_user_id) === false) ? '<i class="fa fa-users"></i>&nbsp;'.$session_nb_users_online.'&nbsp;'.$LANG['users_online'].'&nbsp;|&nbsp;<i class="fa fa-hourglass-end"></i>&nbsp;'.$LANG['index_expiration_in'].'&nbsp;<div style="display:inline;" id="countdown"></div>' : '', '
-        </div><div id="countdown2"></div>
-        <div style="float:right;text-align:right;">
-            <i class="fa fa-clock-o"></i>&nbsp;' . $LANG['server_time']." : ".@date($SETTINGS['date_format'], (string) $_SERVER['REQUEST_TIME'])." - ".@date($SETTINGS['time_format'], (string) $_SERVER['REQUEST_TIME']).'
-        </div>
-    </div>';
-// PAGE LOADING
-echo '
-    <div id="div_loading" class="hidden">
-        <div style="padding:5px; z-index:9999999;" class="ui-widget-content ui-state-focus ui-corner-all">
-            <i class="fa fa-cog fa-spin fa-2x"></i>
-        </div>
-    </div>';
-// Alert BOX
-echo '
-    <div id="div_dialog_message" style="display:none;">
-        <div id="div_dialog_message_text" style="text-align:center; padding:4px; font-size:12px; margin-top:10px;"></div>
-    </div>';
-
-// WARNING FOR QUERY ERROR
-echo '
-    <div id="div_mysql_error" style="display:none;">
-        <div style="padding:10px;text-align:center;" id="mysql_error_warning"></div>
-    </div>';
-
-//Personnal SALTKEY
-if (isset($SETTINGS['enable_pf_feature']) && $SETTINGS['enable_pf_feature'] === "1") {
-    echo '
-        <div id="div_set_personal_saltkey" style="display:none;padding:4px;">
-            <div style="text-align:center;margin:5px;padding:3px;" id="expected_psk_complexPw" class="ui-widget ui-state-active ui-corner-all hidden">', isset($SETTINGS['personal_saltkey_security_level']) === true && empty($SETTINGS['personal_saltkey_security_level']) === false && isset($SETTINGS_EXT['pwComplexity']) === true ? $LANG['complex_asked']." : ".$SETTINGS_EXT['pwComplexity'][$SETTINGS['personal_saltkey_security_level']][1] : '', '</div>
-            <table border="0">
-                <tr>
-                    <td>
-                        <i class="fa fa-key"></i> <b>' . $LANG['home_personal_saltkey'].'</b>
-                    </td>
-                    <td>
-                        <input type="password" name="input_personal_saltkey" id="input_personal_saltkey" style="width:200px;padding:5px;margin-left:10px;" class="text ui-widget-content ui-corner-all text_without_symbols tip" value="', isset($_SESSION['user_settings']['clear_psk']) ? (string) $_SESSION['user_settings']['clear_psk'] : '', '" title="<i class=\'fa fa-bullhorn\'></i>&nbsp;'.$LANG['text_without_symbols'].'" />
-                        <span id="set_personal_saltkey_last_letter" style="font-weight:bold;font-size:20px;"></span>
-                    </td>
-                </tr>
-                <tr>
-                    <td></td>
-                    <td>
-                        <div id="psk_strength" style="margin:3px 0 0 10px;"></div>
-                        <input type="hidden" id="psk_strength_value" />
-                    </td>
-                </tr>
-            </table>
-            <div style="display:none;margin-top:5px;text-align:center;padding:4px;" id="set_personal_saltkey_warning" class="ui-widget-content ui-corner-all"></div>
-        </div>';
-}
-
-// user profile
-echo '
-<div id="dialog_user_profil" style="display:none;padding:4px;">
-    <div id="div_user_profil">
-        <i class="fa fa-cog fa-spin fa-2x"></i>&nbsp;<b>' . $LANG['please_wait'].'</b>
-    </div>
-    <input type="hidden" id="force_show_dialog" value="',
-isset($_SESSION['unsuccessfull_login_attempts']) === true
-&& $_SESSION['unsuccessfull_login_attempts']['nb'] !== 0
-&& $_SESSION['unsuccessfull_login_attempts']['shown'] === false ?
-'1' : '0', '" />
-</div>';
-
-// DUO box
-echo '
-<div id="dialog_duo" style="display:none;padding:4px;">
-    <div id="div_duo"></div>
-    ' . $LANG['duo_loading_iframe'].'
-    <form method="post" id="duo_form" action="">
-        <input type="hidden" id="duo_login" name="duo_login" value="', null !== $post_duo_login ? $post_duo_login : '', '" />
-        <input type="hidden" id="duo_pwd" name="duo_pwd" value="', null !== $post_duo_pwd ? $post_duo_pwd : '', '" />
-        <input type="hidden" id="duo_data" name="duo_data" value="', null !== $post_duo_data ? $post_duo_data : '', '" />
-    </form>
-</div>';
-
-// INCREASE session time
-echo '
-<div id="div_increase_session_time" style="display:none;padding:4px;">
-    <b>' . $LANG['index_session_duration'].':</b>
-    <input type="text" id="input_session_duration" style="width:50px;padding:5px;margin:0 10px 0 10px;" class="text ui-widget-content ui-corner-all" value="', isset($_SESSION['user_settings']['session_duration']) ? (int) $_SESSION['user_settings']['session_duration'] / 60 : 60, '" />
-    <b>' . $LANG['minutes'].'</b>
-    <div style="display:none;margin-top:5px;text-align:center;padding:4px;" id="input_session_duration_warning" class="ui-widget-content ui-state-error ui-corner-all"></div>
-</div>';
-
-closelog();
-
-
-if (isset($_SESSION['user_id']) === false || empty($_SESSION['user_id']) === true) {
     ?>
-    <script type="text/javascript">
-    var twoFaMethods = parseInt($("#2fa_google").val()) + parseInt($("#2fa_agses").val()) + parseInt($("#2fa_duo").val()) + parseInt($("#2fa_yubico").val());
-    if (twoFaMethods > 1) {
-        var loginButMethods = ['google', 'agses', 'duo'];
 
-        // Show methods
-        $("#2fa_selector").removeClass("hidden");
+    <!-- Modal -->
+    <div class="modal fade" id="warningModal" tabindex="-1" role="dialog" aria-labelledby="Caution" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="warningModalTitle"></h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close" id="warningModalCrossClose">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <div class="modal-body" id="warningModalBody">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal" id="warningModalButtonClose"></button>
+                    <button type="button" class="btn btn-primary" id="warningModalButtonAction"></button>
+                </div>
+            </div>
+        </div>
+    </div>
 
-        // Hide login button
-        $('#div-login-button').addClass('hidden');
 
-        // Unselect any method
-        $(".2fa_selector_select").prop('checked', false);
 
-        // Prepare buttons
-        $('.2fa-methods').radiosforbuttons({
-            margin: 20,
-            vertical: false,
-            group: false,
-            autowidth: true
-        });
+    <!-- REQUIRED SCRIPTS -->
 
-        // Handle click
-        $('.radiosforbuttons-2fa_selector_select')
-        .click(function() {
-            $('.div-2fa-method').addClass('hidden');
-            var twofaMethod = $(this).data('id').split('-');
+    <!-- Font Awesome Icons -->
+    <link href="plugins/fontawesome-free-6/css/fontawesome.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" rel="stylesheet">
+    <link href="plugins/fontawesome-free-6/css/solid.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" rel="stylesheet">
+    <link href="plugins/fontawesome-free-6/css/regular.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" rel="stylesheet">
+    <link href="plugins/fontawesome-free-6/css/brands.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" rel="stylesheet">
+    <link href="plugins/fontawesome-free-6/css/v5-font-face.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" rel="stylesheet" /> 
+    <!-- jQuery -->
+    <script src="plugins/jquery/jquery.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <script src="plugins/jquery/jquery.cookie.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/javascript"></script>
+    <!-- jQuery UI -->
+    <script src="plugins/jqueryUI/jquery-ui.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <link rel="stylesheet" href="plugins/jqueryUI/jquery-ui.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <!-- Popper -->
+    <script src="plugins/popper/umd/popper.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- Bootstrap -->
+    <script src="plugins/bootstrap/js/bootstrap.bundle.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- AdminLTE -->
+    <script src="plugins/adminlte/js/adminlte.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- Altertify -->
+    <!--<script type="text/javascript" src="plugins/alertifyjs/alertify.min.js"></script>-->
+    <!-- Toastr -->
+    <script type="text/javascript" src="plugins/toastr/toastr.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- STORE.JS -->
+    <script type="text/javascript" src="plugins/store.js/dist/store.everything.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- cryptojs-aesphp -->
+    <script type="text/javascript" src="includes/libraries/cryptojs/crypto-js.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <script type="text/javascript" src="includes/libraries/cryptojs/encryption.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- pace -->
+    <script type="text/javascript" data-pace-options='{ "ajax": true, "eventLag": false }' src="plugins/pace-progress/pace.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- select2 -->
+    <script type="text/javascript" src="plugins/select2/js/select2.full.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- simplePassMeter -->
+    <link rel="stylesheet" href="plugins/simplePassMeter/simplePassMeter.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/css" />
+    <script type="text/javascript" src="plugins/simplePassMeter/simplePassMeter.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- platform -->
+    <script type="text/javascript" src="plugins/platform/platform.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- radiobuttons -->
+    <link rel="stylesheet" href="plugins/radioforbuttons/bootstrap-buttons.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/css" />
+    <script type="text/javascript" src="plugins/radioforbuttons/jquery.radiosforbuttons.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- ICHECK -->
+    <!--<link rel="stylesheet" href="./plugins/icheck-material/icheck-material.min.css">-->
+    <link rel="stylesheet" href="./plugins/icheck/skins/all.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+    <script type="text/javascript" src="./plugins/icheck/icheck.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- bootstrap-add-clear -->
+    <script type="text/javascript" src="plugins/bootstrap-add-clear/bootstrap-add-clear.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <!-- DOMPurify -->
+    <script type="text/javascript" src="plugins/DOMPurify/purify.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
 
-            // Save user choice
-            $('#2fa_user_selection').val(twofaMethod[1]);
-
-            // Show 2fa method div
-            $('#div-2fa-'+twofaMethod[1]).removeClass('hidden');
-
-            // Show login button if required
-            if ($.inArray(twofaMethod[1], loginButMethods) !== -1) {
-                $('#div-login-button').removeClass('hidden');
-            } else {
-                $('#div-login-button').addClass('hidden');
-            }
-
-            // Make focus
-            if (twofaMethod[1] === 'google') {
-                $('#ga_code').focus();
-            } else if (twofaMethod[1] === 'yubico') {
-                $('#yubiko_key').focus();
-            } else if (twofaMethod[1] === 'agses') {
-                startAgsesAuth();
-            }
-        });
-    } else if (twoFaMethods === 1) {
-        if ($('#2fa_google').val() === '1') {
-            $('#div-2fa-google').removeClass('hidden');
-        } else if ($('#2fa_yubico').val() === '1') {
-            $('#div-2fa-yubico').removeClass('hidden');
-        } else if ($('#2fa_agses').val() === '1') {
-            $('#div-2fa-agses').removeClass('hidden');
+    <?php
+    $get['page'] = $request->query->filter('page', null, FILTER_SANITIZE_SPECIAL_CHARS);
+    if ($menuAdmin === true) {
+        ?>
+        <link rel="stylesheet" href="./plugins/toggles/css/toggles.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+        <link rel="stylesheet" href="./plugins/toggles/css/toggles-modern.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+        <script src="./plugins/toggles/toggles.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/javascript"></script>
+        <!-- InputMask -->
+        <script src="./plugins/inputmask/jquery.inputmask.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <!-- Sortable -->
+        <!--<script src="./plugins/sortable/jquery.sortable.js"></script>-->
+        <!-- PLUPLOAD -->
+        <script type="text/javascript" src="plugins/plupload/js/plupload.full.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <!-- DataTables -->
+        <link rel="stylesheet" src="./plugins/datatables/css/jquery.dataTables.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+        <link rel="stylesheet" src="./plugins/datatables/css/dataTables.bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+        <script type="text/javascript" src="./plugins/datatables/js/jquery.dataTables.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <script type="text/javascript" src="./plugins/datatables/js/dataTables.bootstrap4.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <link rel="stylesheet" src="./plugins/datatables/extensions/Responsive-2.2.2/css/responsive.bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+        <script type="text/javascript" src="./plugins/datatables/extensions/Responsive-2.2.2/js/dataTables.responsive.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <script type="text/javascript" src="./plugins/datatables/extensions/Responsive-2.2.2/js/responsive.bootstrap4.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <script type="text/javascript" src="./plugins/datatables/plugins/select.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <link rel="stylesheet" src="./plugins/datatables/extensions/Scroller-1.5.0/css/scroller.bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+        <script type="text/javascript" src="./plugins/datatables/extensions/Scroller-1.5.0/js/dataTables.scroller.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <?php
+    } elseif (isset($get['page']) === true) {
+        if (in_array($get['page'], ['items', 'import']) === true) {
+            ?>
+            <link rel="stylesheet" href="./plugins/jstree/themes/default/style.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+            <link rel="stylesheet" href="./plugins/jstree/themes/default-dark/style.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+            <script src="./plugins/jstree/jstree.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/javascript"></script>
+            <!-- countdownTimer -->
+            <script src="./plugins/jquery.countdown360/jquery.countdown360.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- SUMMERNOTE -->
+            <link rel="stylesheet" href="./plugins/summernote/summernote-bs4.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script src="./plugins/summernote/summernote-bs4.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- date-picker -->
+            <link rel="stylesheet" href="./plugins/bootstrap-datepicker/css/bootstrap-datepicker3.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script src="./plugins/bootstrap-datepicker/js/bootstrap-datepicker.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- time-picker -->
+            <link rel="stylesheet" href="./plugins/timepicker/bootstrap-timepicker.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script src="./plugins/timepicker/bootstrap-timepicker.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- PLUPLOAD -->
+            <script type="text/javascript" src="plugins/plupload/js/plupload.full.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- VALIDATE -->
+            <script type="text/javascript" src="plugins/jquery-validation/jquery.validate.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- PWSTRENGHT -->
+            <script type="text/javascript" src="plugins/zxcvbn/zxcvbn.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <script type="text/javascript" src="plugins/jquery.pwstrength/pwstrength-bootstrap.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- TOGGLE -->
+            <link rel="stylesheet" href="./plugins/toggles/css/toggles.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+            <link rel="stylesheet" href="./plugins/toggles/css/toggles-modern.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" />
+            <script src="./plugins/toggles/toggles.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>" type="text/javascript"></script>
+        <?php
+        } elseif (in_array($get['page'], ['search', 'folders', 'users', 'roles', 'utilities.deletion', 'utilities.logs', 'utilities.database', 'utilities.renewal', 'tasks']) === true) {
+            ?>
+            <!-- DataTables -->
+            <link rel="stylesheet" src="./plugins/datatables/css/jquery.dataTables.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <link rel="stylesheet" src="./plugins/datatables/css/dataTables.bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script type="text/javascript" src="./plugins/datatables/js/jquery.dataTables.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <script type="text/javascript" src="./plugins/datatables/js/dataTables.bootstrap4.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <link rel="stylesheet" src="./plugins/datatables/extensions/Responsive-2.2.2/css/responsive.bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script type="text/javascript" src="./plugins/datatables/extensions/Responsive-2.2.2/js/dataTables.responsive.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <script type="text/javascript" src="./plugins/datatables/extensions/Responsive-2.2.2/js/responsive.bootstrap4.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <script type="text/javascript" src="./plugins/datatables/plugins/select.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <link rel="stylesheet" src="./plugins/datatables/extensions/Scroller-1.5.0/css/scroller.bootstrap4.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script type="text/javascript" src="./plugins/datatables/extensions/Scroller-1.5.0/js/dataTables.scroller.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- dater picker -->
+            <link rel="stylesheet" href="./plugins/bootstrap-datepicker/css/bootstrap-datepicker3.min.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script src="./plugins/bootstrap-datepicker/js/bootstrap-datepicker.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- daterange picker -->
+            <link rel="stylesheet" href="./plugins/daterangepicker/daterangepicker.css?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>">
+            <script src="./plugins/moment/moment.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <script src="./plugins/daterangepicker/daterangepicker.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- SlimScroll -->
+            <script src="./plugins/slimScroll/jquery.slimscroll.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- FastClick -->
+            <script src="./plugins/fastclick/fastclick.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <?php
+        } elseif ($get['page'] === 'profile') {
+            ?>
+            <!-- FILESAVER -->
+            <script type="text/javascript" src="plugins/downloadjs/download.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- PLUPLOAD -->
+            <script type="text/javascript" src="plugins/plupload/js/plupload.full.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <?php
+        } elseif ($get['page'] === 'export') {
+            ?>
+            <!-- FILESAVER -->
+            <script type="text/javascript" src="plugins/downloadjs/download.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <!-- PWSTRENGHT -->
+            <script type="text/javascript" src="plugins/zxcvbn/zxcvbn.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+            <script type="text/javascript" src="plugins/jquery.pwstrength/pwstrength-bootstrap.min.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+        <?php
         }
-        $('#login').focus();
+    }
+    ?>
+    <!-- functions -->
+    <script type="text/javascript" src="includes/js/functions.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <script type="text/javascript" src="includes/js/CreateRandomString.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+    <input type="hidden" id="encryptClientServerStatus" value="<?php echo $SETTINGS['encryptClientServer'] ?? 1; ?>" />
+
+    </body>
+
+</html>
+
+<script type="text/javascript">
+    //override defaults
+    /*alertify.defaults.transition = "slide";
+    alertify.defaults.theme.ok = "btn btn-primary";
+    alertify.defaults.theme.cancel = "btn btn-danger";
+    alertify.defaults.theme.input = "form-control";*/
+
+    toastr.options = {
+        "closeButton": false,
+        "debug": false,
+        "newestOnTop": false,
+        "progressBar": false,
+        "positionClass": "toast-bottom-right",
+        "preventDuplicates": true,
+        "onClick": "close",
+        "showDuration": "300",
+        "hideDuration": "1000",
+        "timeOut": "0",
+        "extendedTimeOut": "0",
+        "showEasing": "swing",
+        "hideEasing": "linear",
+        "showMethod": "fadeIn",
+        "hideMethod": "fadeOut"
     }
 
-    $('.submit-button').keypress(function(event){
-        if (event.keyCode === 10 || event.keyCode === 13) {
-            launchIdentify('', '<?php echo $nextUrl; ?>', '');
-            event.preventDefault();
+    // Clipboard translations
+    const TRANSLATIONS_CLIPBOARD = {
+        clipboard_unsafe: "<?php echo $lang->get('clipboard_unsafe'); ?>",
+        clipboard_clear_now: "<?php echo $lang->get('clipboard_clear_now'); ?>",
+        clipboard_clearing_failed: "<?php echo $lang->get('clipboard_clearing_failed'); ?>",
+        clipboard_cleared: "<?php echo $lang->get('clipboard_cleared'); ?>",
+        unable_to_clear_clipboard: "<?php echo $lang->get('unable_to_clear_clipboard'); ?>"
+    };
+</script>
+
+<script type="text/javascript" src="includes/js/secure-clipboard-cleaner.js?v=<?php echo TP_VERSION . '.' . TP_VERSION_MINOR; ?>"></script>
+
+<script>
+    $(document).ready(function() {
+        // PWA with windowControlsOverlay
+        if ('windowControlsOverlay' in navigator) {
+            // Event listener for window-controls-overlay changes
+            navigator.windowControlsOverlay.addEventListener('geometrychange', function(event) {
+                // Wait few time for resize animations
+                $(this).delay(250).queue(function() {
+                    // Move header content
+                    adjustForWindowControlsOverlay(event.titlebarAreaRect);
+                    $(this).dequeue();
+                });
+            });
+
+            // Move header content
+            adjustForWindowControlsOverlay(navigator.windowControlsOverlay.getTitlebarAreaRect());
+        }
+
+        function adjustForWindowControlsOverlay(rect) {
+            // Display width - available space + 5px margin
+            let margin = 5;
+            let width = document.documentElement.clientWidth - rect.width + margin;
+
+            if (width - margin !== document.documentElement.clientWidth) {
+                // Add right padding to main-header
+                $('.main-header').css('padding-right', width + 'px');
+
+                // Window drag area
+                $('.main-header').css('-webkit-app-region', 'drag');
+                $('.main-header *').css('-webkit-app-region', 'no-drag');
+            } else {
+                // Remove right padding to main-header
+                $('.main-header').css('padding-right', '0px');
+
+                // No window drag area when titlebar is present
+                $('.main-header').css('-webkit-app-region', 'no-drag');
+            }
         }
     });
 
-    $('#yubiko_key').change(function(event) {
-        launchIdentify('', '<?php echo $nextUrl; ?>', '');
-        event.preventDefault();
-    });
-    </script>
-    <?php
-}
-
-?>
-<script type="text/javascript">
-NProgress.start();
+    // Handle external link open in current PWA
+    if ("launchQueue" in window) {
+        window.launchQueue.setConsumer((launchParams) => {
+            if (launchParams.targetURL) {
+                // Redirect on new URL in focus-existing client mode
+                window.location.href = launchParams.targetURL;
+            }
+        });
+    }
 </script>
-    </body>
-</html>
+
+<?php
+//$get = [];
+//$get['page'] = $request->query->get('page') === null ? '' : $request->query->get('page');
+
+// Load links, css and javascripts
+if (isset($SETTINGS['cpassman_dir']) === true) {
+    include_once $SETTINGS['cpassman_dir'] . '/includes/core/load.js.php';
+    if ($menuAdmin === true) {
+        include_once $SETTINGS['cpassman_dir'] . '/pages/admin.js.php';
+        if ($get['page'] === '2fa') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/2fa.js.php';
+        } elseif ($get['page'] === 'api') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/api.js.php';
+        } elseif ($get['page'] === 'backups') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/backups.js.php';
+        } elseif ($get['page'] === 'emails') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/emails.js.php';
+        } elseif ($get['page'] === 'ldap') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/ldap.js.php';
+        } elseif ($get['page'] === 'uploads') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/uploads.js.php';
+        } elseif ($get['page'] === 'fields') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/fields.js.php';
+        } elseif ($get['page'] === 'options') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/options.js.php';
+        } elseif ($get['page'] === 'statistics') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/statistics.js.php';
+        } elseif ($get['page'] === 'tasks') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/tasks.js.php';
+        } elseif ($get['page'] === 'oauth') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/oauth.js.php';        
+        } elseif ($get['page'] === 'tools') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/tools.js.php';
+        }
+    } elseif (isset($get['page']) === true && $get['page'] !== '') {
+        if ($get['page'] === 'items') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/items.js.php';
+        } elseif ($get['page'] === 'import') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/import.js.php';
+        } elseif ($get['page'] === 'export') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/export.js.php';
+        } elseif ($get['page'] === 'offline') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/offline.js.php';
+        } elseif ($get['page'] === 'search') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/search.js.php';
+        } elseif ($get['page'] === 'profile') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/profile.js.php';
+        } elseif ($get['page'] === 'favourites') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/favorites.js.php';
+        } elseif ($get['page'] === 'folders') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/folders.js.php';
+        } elseif ($get['page'] === 'users') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/users.js.php';
+        } elseif ($get['page'] === 'roles') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/roles.js.php';
+        } elseif ($get['page'] === 'utilities.deletion') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/utilities.deletion.js.php';
+        } elseif ($get['page'] === 'utilities.logs') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/utilities.logs.js.php';
+        } elseif ($get['page'] === 'utilities.database') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/utilities.database.js.php';
+        } elseif ($get['page'] === 'utilities.renewal') {
+            include_once $SETTINGS['cpassman_dir'] . '/pages/utilities.renewal.js.php';
+        }
+    } else {
+        include_once $SETTINGS['cpassman_dir'] . '/includes/core/login.js.php';
+    }
+}

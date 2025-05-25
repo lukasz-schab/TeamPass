@@ -1,30 +1,43 @@
-# Teampass
+[![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner-direct.svg)](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
 
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/c1709641128d42d1ac6ec7fad3cb921c)](https://www.codacy.com/app/nilsteampassnet/TeamPass?utm_source=github.com&utm_medium=referral&utm_content=nilsteampassnet/TeamPass&utm_campaign=badger)
+# Teampass 3
 
-Teampass is a Collaborative Passwords Manager
+Teampass is a Collaborative Passwords Manager solution installed On-Premise.
 
-> Copyright © 2009-2019, [Nils Laumaillé](Nils@Teampass.net)
+[![StandWithUkraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/badges/StandWithUkraine.svg)](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
+
+![](https://img.shields.io/github/stars/nilsteampassnet/TeamPass?style=social)
+![](https://img.shields.io/github/license/nilsteampassnet/teampass)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://makeapullrequest.com)
+
+![](https://img.shields.io/github/v/release/nilsteampassnet/Teampass)
+![](https://img.shields.io/github/commits-since/nilsteampassnet/teampass/latest)
+[![Scrutinizer Code Quality](https://scrutinizer-ci.com/g/nilsteampassnet/TeamPass/badges/quality-score.png?b=master)](https://scrutinizer-ci.com/g/nilsteampassnet/TeamPass/?branch=master)
+[![Build Status](https://scrutinizer-ci.com/g/nilsteampassnet/TeamPass/badges/build.png?b=master)](https://scrutinizer-ci.com/g/nilsteampassnet/TeamPass/build-status/master)
+[![Code Intelligence Status](https://scrutinizer-ci.com/g/nilsteampassnet/TeamPass/badges/code-intelligence.svg?b=master)](https://scrutinizer-ci.com/code-intelligence)
+
+> Copyright © 2009-2024, [Nils Laumaillé](Nils@Teampass.net)
 
 <!-- MDTOC maxdepth:2 firsth1:0 numbering:0 flatten:0 bullets:1 updateOnSave:1 -->
 
-- [Requirements](#requirements)   
-- [Usage](#usage)   
-   - [With Docker](#with-docker)   
-   - [With Docker Compose](#with-docker-compose)   
-- [Update](#update)   
-- [Languages](#languages)   
-- [Licence Agreement](#licence-agreement)   
-- [Website](#website)   
-- [Bugs](#bugs)   
-- [Requests](#requests)   
+- [Requirements](#requirements)
+  - [About PHP versions](#about-php-versions)
+- [Documentation](#documentation)
+  - [Run from Docker image](#run-from-docker-image)
+  - [Install with Docker](#install-with-docker)
+  - [Install with Docker Compose](#install-with-docker-compose)
+- [Languages](#languages)
+- [Licence Agreement](#licence-agreement)
+- [Website](#website)
+- [Bugs](#bugs)
 
 <!-- /MDTOC -->
 
 ## Requirements
 
-* MySQL 5.1 or higher,
-* PHP 5.5.0 or higher,
+* MySQL 5.7 or higher,
+* Mariadb 10.7 or higher
+* PHP 8.1 or newer,
 * PHP extensions:
   * mcrypt
   * openssl
@@ -34,46 +47,60 @@ Teampass is a Collaborative Passwords Manager
   * iconv
   * xml
   * gd
-  * openssl
+  * mysql
   * curl
+  * gmp
 
-## Usage
+Website article with instructions: https://www.valters.eu/teampass-a-self-hosted-password-manager-to-increase-organizations-cybersecurity/  
 
-* Read [installation related pages](https://teampass.readthedocs.io)
-* Once uploaded, launch Teampass in a browser and follow instructions.
 
-### With Docker
-The Docker image provided will create a Teampass installation in its `/var/www/html/` directory, which you should mount as a volume to keep persistent. You should also mount `/var/php/session`, otherwise the installation will freeze during *Server checks* phase. **SSL is not provided** if you use this image without a proxy in front of it. See the included [Docker Compose file](docker-compose.yml) for an example setup.
 
-Sample docker run command: 
-```
-docker run --name teampass -d --restart always -v /var/teampass-data/www:/var/www/html -v /var/teampass-data/php_session:/var/php/session -p 9501:80 teampass/teampass
-```
+YouTube video: https://youtu.be/eXieWAIsGzc?feature=shared
+
+
+### About PHP versions
+
+Teampass should be installed using the most recent PHP version.
+The branch `master` is the living one that is improved and comes with new features.
+It requires __at least__ `PHP 8.1` installed on the server.
+
+Nevertheless, Teampass can be used with PHP 7.4 version.
+The Github Teampass project has a dedicated branch called `PHP_7.4` for this version.
+Notice that only bug fixing will be performed on this branch.
+
+## Documentation
+
+> ✍️ [Documentation](https://documentation.teampass.net) is available.
+
+### Run from Docker image
+
+[@valterseu](https://github.com/valterseu) created a Docker image from scratch with no dependencies and fully automated that you can also use.
+
+Open the [Docker Hub image](https://hub.docker.com/r/valterseu/teampass) and get all information.
+
+Complete usage documentation can be found at [GitHub Docker image URL](https://github.com/valterseu/TeamPass).
+
+### Install with Docker
+The Docker image provided will create a Teampass installation in its `/var/www/html/` directory, which you should mount as a volume to keep persistent. **SSL is not provided** if you use this image without a proxy in front of it. See the included [Docker Compose file](docker-compose.yml) for an example setup.
 
 **Note:** Use `/var/www/html/sk` as your "Absolute path to saltkey" during installation.
 
 
-### With Docker Compose
-The included [docker-compose.yml](docker-compose.yml) file is an example setup, using virtual host-based reverse proxy routing to provide SSL. If you want to use the Compose file as-is, you will need to provide an SSL certificate with a CN matching the `teampass` service's `VIRTUAL_HOST` variable. See the documentation for the [jwilder/nginx-proxy](https://github.com/jwilder/nginx-proxy) image for details.
+### Install with Docker Compose
+The included [docker-compose.yml](docker-compose.yml) file is an example setup, using virtual host-based reverse proxy routing to provide SSL. If you want to use the Compose file as-is, you will need to provide an SSL certificate with a CN matching the `teampass` service's `VIRTUAL_HOST` variable. See the documentation for the [jwilder/nginx-proxy](https://github.com/jwilder/nginx-proxy) image for details. In short, you'll need to put your certificate file (with extension .crt, e.g. teampass.domain.local.crt) and the according private key file (with extension .key, e.g. teampass.domain.local.key) into the directory ssl, named exactly after the FQDN you put into the `VIRTUAL_HOST` variable. Make sure to restart the nginx service after changes to the certificate or at least signal it with the reload command: `docker-compose exec nginx nginx -s reload`.
 
+**Note1:** The database's hostname is `db`. You can find the database's credentials in the environment variables of the `db` service.
 
-**Note:** The database's hostname is `db`. You can find the database's credentials in the environment variables of the `db` service.
-
-**Note:** Use `/var/www/html/sk` as your "Absolute path to saltkey" during installation.
-
-## Update
-
-* Read [upgrade related pages](https://teampass.readthedocs.io)
-* Once uploaded, launch install/upgrade.php and follow instructions.
+**Note2:** Use `/var/www/html/sk` as your "Absolute path to saltkey" during installation.
 
 ## Languages
 
 Teampass is currently available in the following languages:
+* ENGLISH
 * CATALAN
 * CHINESE
 * CZECH
 * DUTCH
-* ENGLISH
 * ESTONIAN
 * FRENCH
 * GERMAN
@@ -90,17 +117,12 @@ Teampass is currently available in the following languages:
 * UKRAINIAN
 * VIETNAMESE
 
-Languages strings are managed at [POEditor.com](https://poeditor.com/projects/view?id=16418).
+Languages strings are managed at [POEditor.com](https://poeditor.com/projects/view?id=433631). 
+Please participate to improving its translation by joining Teampass POEditor project.
 
 ## Licence Agreement
 
-Before installing and using TeamPass, you must accept its licence defined as GNU AFFERO GPL.
-
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or any later version.
-
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
-
-[Read Licence](license.md)
+For detailed information on the licenses of our dependencies and our licence policy, please see [Detailed Licence Information](/licences/dependencies.licences.md).
 
 ## Website
 
@@ -108,8 +130,5 @@ Visit [Teampass.net](https://teampass.net/)
 
 ## Bugs
 
-If you discover bugs, please report them in [GitHub Issues](https://github.com/nilsteampassnet/TeamPass/issues).
+If you discover bugs, please report them in [Github Issues](https://github.com/nilsteampassnet/TeamPass/issues).
 
-## Requests
-
-Please report feature requests in [UserEcho](https://teamPass.userecho.com).

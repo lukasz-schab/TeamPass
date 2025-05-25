@@ -1,134 +1,197 @@
 <?php
+
+declare(strict_types=1);
+
 /**
- * @package       downloadFile.php
- * @author        Nils Laumaillé <nils@teampass.net>
- * @version       2.1.27
- * @copyright     2009-2019 Nils Laumaillé
- * @license       GNU GPL-3.0
- * @link          https://www.teampass.net
- *
- * This library is distributed in the hope that it will be useful,
+ * Teampass - a collaborative passwords manager.
+ * ---
+ * This file is part of the TeamPass project.
+ * 
+ * TeamPass is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ * 
+ * TeamPass is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ * 
+ * Certain components of this file may be under different licenses. For
+ * details, see the `licenses` directory or individual file headers.
+ * ---
+ * @file      downloadFile.php
+ * @author    Nils Laumaillé (nils@teampass.net)
+ * @copyright 2009-2025 Teampass.net
+ * @license   GPL-3.0
+ * @see       https://www.teampass.net
  */
 
-require_once 'SecureHandler.php';
-session_start();
-if (!isset($_SESSION['CPM']) || !isset($_SESSION['key_tmp']) || !isset($_SESSION['key']) || $_SESSION['CPM'] != 1 || $_GET['key'] != $_SESSION['key'] || $_GET['key_tmp'] != $_SESSION['key_tmp'] || empty($_SESSION['key']) || empty($_SESSION['key_tmp'])) {
-    die('Hacking attempt...');
-}
+use voku\helper\AntiXSS;
+use TeampassClasses\NestedTree\NestedTree;
+use TeampassClasses\SessionManager\SessionManager;
+use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
+use TeampassClasses\Language\Language;
+use EZimuel\PHPSecureSession;
+use TeampassClasses\PerformChecks\PerformChecks;
+use TeampassClasses\ConfigManager\ConfigManager;
+
+// Load functions
+require_once 'main.functions.php';
+
+// init
+loadClasses('DB');
+$session = SessionManager::getSession();
+$request = SymfonyRequest::createFromGlobals();
+$lang = new Language($session->get('user-language') ?? 'english');
+$antiXss = new AntiXSS();
 
 // Load config
-if (file_exists('../includes/config/tp.config.php')) {
-    include_once '../includes/config/tp.config.php';
-} elseif (file_exists('./includes/config/tp.config.php')) {
-    include_once './includes/config/tp.config.php';
-} elseif (file_exists('../../includes/config/tp.config.php')) {
-    require_once '../../includes/config/tp.config.php';
-} else {
-    throw new Exception("Error file '/includes/config/tp.config.php' not exists", 1);
+$configManager = new ConfigManager();
+$SETTINGS = $configManager->getAllSettings();
+
+// Do checks
+// Instantiate the class with posted data
+$checkUserAccess = new PerformChecks(
+    dataSanitizer(
+        [
+            'type' => htmlspecialchars($request->request->get('type', ''), ENT_QUOTES, 'UTF-8'),
+        ],
+        [
+            'type' => 'trim|escape',
+        ],
+    ),
+    [
+        'user_id' => returnIfSet($session->get('user-id'), null),
+        'user_key' => returnIfSet($session->get('key'), null),
+    ]
+);
+// Handle the case
+echo $checkUserAccess->caseHandler();
+if (
+    $checkUserAccess->userAccessPage('items') === false ||
+    $checkUserAccess->checkSession() === false
+) {
+    // Not allowed page
+    $session->set('system-error_code', ERR_NOT_ALLOWED);
+    include $SETTINGS['cpassman_dir'] . '/error.php';
+    exit;
 }
 
-// Include files
-require_once $SETTINGS['cpassman_dir'].'/includes/libraries/protect/SuperGlobal/SuperGlobal.php';
-$superGlobal = new protect\SuperGlobal\SuperGlobal();
+// Define Timezone
+date_default_timezone_set($SETTINGS['timezone'] ?? 'UTC');
+
+// Set header properties
+header('Content-type: text/html; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+error_reporting(E_ERROR);
+set_time_limit(0);
+
+// --------------------------------- //
 
 // Prepare GET variables
-$get_filename = $superGlobal->get("name", "GET");
-$get_fileid = $superGlobal->get("fileid", "GET");
+$getData = dataSanitizer(
+    [
+        'filename' => $request->query->get('name'),
+        'fileid' => $request->query->get('fileid'),
+        'pathIsFiles' => $request->query->get('pathIsFiles'),
+    ],
+    [
+        'filename' => 'trim|escape',
+        'fileid' => 'cast:integer',
+        'pathIsFiles' => 'trim|escape',
+    ]
+);
+$get_filename = (string) $antiXss->xss_clean($getData['filename']);
+$get_fileid = (int) $antiXss->xss_clean($getData['fileid']);
+$get_pathIsFiles = (string) $antiXss->xss_clean($getData['pathIsFiles']);
 
-// prepare Encryption class calls
-use \Defuse\Crypto\Crypto;
-use \Defuse\Crypto\File;
-use \Defuse\Crypto\Exception as Ex;
+// Remove newline characters from the filename
+$get_filename = str_replace(array("\r", "\n"), '', $get_filename);
 
-header('Content-disposition: attachment; filename='.rawurldecode(basename($get_filename)));
+// Validate the filename to ensure it does not contain unwanted characters
+$get_filename = preg_replace('/[^a-zA-Z0-9_\.-]/', '', basename($get_filename));
+
+// Escape quotes to prevent header injection
+$get_filename = str_replace('"', '\"', $get_filename);
+
+// Use Content-Disposition header with double quotes around filename
+header('Content-Disposition: attachment; filename="' . rawurldecode($get_filename) . '"');
 header('Content-Type: application/octet-stream');
 header('Cache-Control: must-revalidate, no-cache, no-store');
 header('Expires: 0');
-if (isset($_GET['pathIsFiles']) && $_GET['pathIsFiles'] == 1) {
-    readfile($SETTINGS['path_to_files_folder'].'/'.basename($get_filename));
+if (null !== $request->query->get('pathIsFiles') && (int) $get_pathIsFiles === 1) {
+    readfile($SETTINGS['path_to_files_folder'] . '/' . basename($get_filename));
 } else {
-    require_once 'main.functions.php';
-    // connect to DB
-    include $SETTINGS['cpassman_dir'].'/includes/config/settings.php';
-    require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Database/Meekrodb/db.class.php';
-    $pass = defuse_return_decrypted($pass);
-    DB::$host = $server;
-    DB::$user = $user;
-    DB::$password = $pass;
-    DB::$dbName = $database;
-    DB::$port = $port;
-    DB::$encoding = $encoding;
-    DB::$error_handler = true;
-    $link = mysqli_connect($server, $user, $pass, $database, $port);
-    $link->set_charset($encoding);
-
     // get file key
-    $file_info = DB::queryfirstrow(
-        "SELECT file, status 
-        FROM ".prefix_table("files")."
-        WHERE id=%i", $get_fileid
+    $file_info = DB::queryFirstRow(
+        'SELECT f.id AS id, f.file AS file, f.name AS name, f.status AS status, f.extension AS extension,
+        s.share_key AS share_key
+        FROM ' . prefixTable('files') . ' AS f
+        INNER JOIN ' . prefixTable('sharekeys_files') . ' AS s ON (f.id = s.object_id)
+        WHERE s.user_id = %i AND s.object_id = %i',
+        $session->get('user-id'),
+        $get_fileid
     );
-
-    // should we encrypt/decrypt the file
-    encrypt_or_decrypt_file($file_info['file'], $file_info['status']);
-
-    // should we decrypt the attachment?
-    if (isset($file_info['status']) && $file_info['status'] === "encrypted") {
-        // load PhpEncryption library
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Crypto.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Encoding.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'DerivedKeys.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Key.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'KeyOrPassword.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'File.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'RuntimeTests.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'KeyProtectedByPassword.php';
-        require_once $SETTINGS['cpassman_dir'].'/includes/libraries/Encryption/Encryption/'.'Core.php';
-
-        // get KEY
-        $ascii_key = file_get_contents(SECUREPATH."/teampass-seckey.txt");
-
-        // Now encrypt the file with new saltkey
-        $err = '';
-        try {
-            \Defuse\Crypto\File::decryptFile(
-                $SETTINGS['path_to_upload_folder'].'/'.$file_info['file'],
-                $SETTINGS['path_to_upload_folder'].'/'.$file_info['file'].".delete",
-                \Defuse\Crypto\Key::loadFromAsciiSafeString($ascii_key)
-            );
-        } catch (Defuse\Crypto\Exception\WrongKeyOrModifiedCiphertextException $ex) {
-            $err = "An attack! Either the wrong key was loaded, or the ciphertext has changed since it was created either corrupted in the database or intentionally modified by someone trying to carry out an attack.";
-        } catch (Defuse\Crypto\Exception\BadFormatException $ex) {
-            $err = $ex;
-        } catch (Defuse\Crypto\Exception\EnvironmentIsBrokenException $ex) {
-            $err = $ex;
-        } catch (Defuse\Crypto\Exception\CryptoException $ex) {
-            $err = $ex;
-        } catch (Defuse\Crypto\Exception\IOException $ex) {
-            $err = $ex;
-        }
-        if (empty($err) === false) {
-            echo $err;
-        }
-
-        $fp = fopen($SETTINGS['path_to_upload_folder'].'/'.$file_info['file'].".delete", 'rb');
-
-        // Read the file contents
-        fpassthru($fp);
-
-        // Close the file
-        fclose($fp);
-
-        unlink($SETTINGS['path_to_upload_folder'].'/'.$file_info['file'].".delete");
+    
+    // if encrypted
+    if (DB::count() > 0) {
+        // Decrypt the file
+        // deepcode ignore PT: File and path are secured directly inside the function decryptFile()
+        $fileContent = decryptFile(
+            $file_info['file'],
+            $SETTINGS['path_to_upload_folder'],
+            decryptUserObjectKey($file_info['share_key'], $session->get('user-private_key'))
+        );
     } else {
-        $fp = fopen($SETTINGS['path_to_upload_folder'].'/'.$file_info['file'], 'rb');
+        // if not encrypted
+        $file_info = DB::queryFirstRow(
+            'SELECT f.id AS id, f.file AS file, f.name AS name, f.status AS status, f.extension AS extension
+            FROM ' . prefixTable('files') . ' AS f
+            WHERE f.id = %i',
+            $get_fileid
+        );
+        $fileContent = '';
+    }
 
-        // Read the file contents
-        fpassthru($fp);
+    // Set the filename of the download
+    $filename = basename($file_info['name'], '.'.$file_info['extension']);
+    $filename = isBase64($filename) === true ? base64_decode($filename) : $filename;
+    $filename = $filename . '.' . $file_info['extension'];
+    // Get the full path to the file to be downloaded
+    if (file_exists($SETTINGS['path_to_upload_folder'] . '/' .TP_FILE_PREFIX . $file_info['file'])) {
+        $filePath = $SETTINGS['path_to_upload_folder'] . '/' . TP_FILE_PREFIX . $file_info['file'];
+    } else {
+        $filePath = $SETTINGS['path_to_upload_folder'] . '/' . TP_FILE_PREFIX . base64_decode($file_info['file']);
+    }
+    $filePath = realpath($filePath);
 
-        // Close the file
-        fclose($fp);
+    if (WIP === true) error_log('downloadFile.php: filePath: ' . $filePath." - ");
+
+    if ($filePath && is_readable($filePath) && strpos($filePath, realpath($SETTINGS['path_to_upload_folder'])) === 0) {
+        header('Content-Description: File Transfer');
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($filename) . '"');
+        header('Expires: 0');
+        header('Cache-Control: must-revalidate');
+        header('Pragma: public');
+        header('Content-Length: ' . filesize($filePath));
+        flush(); // Clear system output buffer
+        if (empty($fileContent) === true) {
+            // deepcode ignore PT: File and path are secured directly inside the function decryptFile()
+            readfile($filePath); // Read the file from disk
+        } else if (is_string($fileContent)) {
+            exit(base64_decode($fileContent));
+        } else {
+            // $fileContent is not a string
+            echo 'ERROR_No_file_found';
+        exit;
+        }
+        exit;
+    } else {
+        echo 'ERROR_No_file_found';
+        exit;
     }
 }
