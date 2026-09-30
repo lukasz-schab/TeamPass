@@ -1,4 +1,4 @@
-FROM richarvey/nginx-php-fpm:latest
+FROM richarvey/nginx-php-fpm:latest@sha256:fdaa086c82611024776048db9d1eec6324aa1058e1d867a15004c92d24df6187
 
 # The location of the web files
 ARG VOL=/var/www/html

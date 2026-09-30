@@ -16,8 +16,13 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 20
     steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      with:
+        egress-policy: audit
+
     - name: enrichment
-      uses: jitsecurity-controls/jit-github-action@v4.0.5
+      uses: jitsecurity-controls/jit-github-action@e4633e9bfa87500bb62895bcbcf4bbc8b098e685 # v4.0.5
       with:
         security_control: registry.jit.io/control-enrichment-slim:latest
 
@@ -26,8 +31,13 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 20
     steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      with:
+        egress-policy: audit
+
     - name: gitleaks
-      uses: jitsecurity-controls/jit-github-action@v4.0.5
+      uses: jitsecurity-controls/jit-github-action@e4633e9bfa87500bb62895bcbcf4bbc8b098e685 # v4.0.5
       with:
         security_control: registry.jit.io/control-gitleaks-alpine:latest
         security_control_output_file: /tmp/report.json
