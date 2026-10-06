@@ -7,7 +7,7 @@
 # binary, so the only thing the version buys is Composer's own fixes — hence "latest
 # supported line" rather than an alignment with any particular developer setup. Pinned to
 # the minor line, never to "latest", so a future major cannot land silently.
-FROM composer:2.10 AS composer-builder
+FROM composer:2.10@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac AS composer-builder
 
 WORKDIR /app
 
@@ -30,7 +30,7 @@ RUN composer install \
 # ============================================
 # Stage 2: Final production image
 # ============================================
-FROM php:8.3-fpm-alpine3.24
+FROM php:8.3-fpm-alpine3.24@sha256:454b11c8907e32878ce92e87b13c14e1bbe6e1b10f4f96d4a19c9b62ec675d41
 
 # Metadata labels
 LABEL maintainer="TeamPass <nils@teampass.net>" \

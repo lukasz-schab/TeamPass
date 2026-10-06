@@ -1,4 +1,4 @@
-FROM php:8
+FROM php:8@sha256:211e1f4cce06289b8d390fc4c36209fc8cae79f3c5f08eaa3a160a71a2df2211
 EXPOSE 8080
 RUN apt update && apt install -y unzip wget
 WORKDIR /root

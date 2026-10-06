@@ -38,6 +38,9 @@ env:
   IMAGE_NAME_DOCKERHUB: teampass/teampass
   IMAGE_NAME_GHCR: ghcr.io/${{ github.repository_owner }}/teampass
 
+permissions:
+  contents: read
+
 jobs:
   build-and-push:
     name: Build and Push Docker Image
@@ -52,8 +55,14 @@ jobs:
       # ----------------------------------------
       # Checkout code
       # ----------------------------------------
+      - name: Harden the runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          use-policy-store: true
+          api-key: ${{ secrets.STEP_SECURITY_API_KEY }}
+
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ----------------------------------------
       # Resolve the application version from the source
@@ -80,10 +89,10 @@ jobs:
       # Set up build environment
       # ----------------------------------------
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: step-security/setup-buildx-action@e50058a0fcd8d1a7d626c905502d010a468bf238 # v4.4.1
         with:
           driver-opts: |
             image=moby/buildkit:latest
@@ -94,7 +103,7 @@ jobs:
       # ----------------------------------------
       - name: Login to Docker Hub
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           registry: ${{ env.REGISTRY_DOCKERHUB }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -102,7 +111,7 @@ jobs:
 
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           registry: ${{ env.REGISTRY_GHCR }}
           username: ${{ github.actor }}
@@ -113,7 +122,7 @@ jobs:
       # ----------------------------------------
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: step-security/metadata-action@21378f5b76c96c69ac34d21cc3873d85e26381b1 # v6.2.0
         with:
           images: |
             ${{ env.IMAGE_NAME_DOCKERHUB }}
@@ -150,7 +159,7 @@ jobs:
       # ----------------------------------------
       - name: Build and push Docker image
         id: build-and-push
-        uses: docker/build-push-action@v5
+        uses: step-security/docker-build-push-action@b736dc8a921e02a288f956d3dd9111e276a4cfec # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -178,7 +187,7 @@ jobs:
       # ----------------------------------------
       - name: Generate SBOM
         if: github.event_name != 'pull_request'
-        uses: anchore/sbom-action@v0
+        uses: step-security/sbom-action@28bb7d0d2869c9ab0e5571c93591747945819d39 # v0.24.2
         with:
           image: ${{ env.IMAGE_NAME_DOCKERHUB }}:${{ steps.meta.outputs.version }}
           format: spdx-json
@@ -186,7 +195,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-${{ github.sha }}
           path: sbom.spdx.json
@@ -197,7 +206,7 @@ jobs:
       # ----------------------------------------
       - name: Run Trivy vulnerability scanner
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@master
+        uses: step-security/trivy-action@4d04e2d32ba36aae5693467644b22741d68f9115 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME_DOCKERHUB }}:${{ steps.meta.outputs.version }}
           format: 'sarif'
@@ -206,7 +215,7 @@ jobs:
 
       - name: Upload Trivy results to GitHub Security
         if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -260,11 +269,17 @@ jobs:
           --health-retries=3
 
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        with:
+          use-policy-store: true
+          api-key: ${{ secrets.STEP_SECURITY_API_KEY }}
+
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
